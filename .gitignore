@@ -1,0 +1,53 @@
+# build outputs
+/build/
+/bin/
+/qt_client/build/
+
+# cmake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+build.ninja
+compile_commands.json
+.ninja_*
+
+# nested build dirs
+**/CMakeFiles/
+**/CMakeCache.txt
+**/cmake_install.cmake
+**/Makefile
+**/build.ninja
+**/compile_commands.json
+
+# object / library / executable
+*.o
+*.obj
+*.so
+*.a
+*.out
+
+# logs / perf
+*.log
+perf.data*
+core
+
+# editor
+.vscode/
+.idea/
+
+# Qt / QtCreator
+*.pro.user
+*.pro.user.*
+*.qbs.user
+*.user
+*.autosave
+moc_*
+qrc_*.cpp
+ui_*.h
+
+# temporary
+*.swp
+*.swo
+*~
+.DS_Store

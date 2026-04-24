@@ -1,0 +1,76 @@
+syntax = "proto3";
+
+package chat;
+
+// 登录请求
+message LoginRequest {
+  int32 id = 1;
+  string password = 2;
+}
+
+// 登录响应
+message LoginResponse {
+  int32 errcode = 1;
+  int32 id = 2;
+  string name = 3;
+  repeated string offlinemsg = 4;
+  repeated string friends = 5;
+  repeated string groups = 6;
+}
+
+// 注册请求
+message RegisterRequest {
+  string name = 1;
+  string password = 2;
+}
+
+// 注册响应
+message RegisterResponse {
+  int32 errcode = 1;
+  int32 id = 2;
+}
+
+// 单聊请求
+message OneChatRequest {
+  int32 id = 1;
+  int32 toid = 2;
+  string name = 3;
+  string msg = 4;
+  string time = 5;
+}
+
+// 历史消息中的单条记录
+message ChatHistoryItem {
+  int64 id = 1;
+  int32 fromid = 2;
+  int32 toid = 3;
+  int32 groupid = 4;
+  string msg = 5;
+  string send_time = 6;
+}
+
+// 单聊历史查询请求
+message QueryOneChatHistoryRequest {
+  int32 id = 1;
+  int32 limit = 2;
+}
+
+// 单聊历史查询响应
+message QueryOneChatHistoryResponse {
+  int32 errcode = 1;
+  int32 id = 2;
+  repeated ChatHistoryItem history = 3;
+}
+
+// 群聊历史查询请求
+message QueryGroupChatHistoryRequest {
+  int32 groupid = 1;
+  int32 limit = 2;
+}
+
+// 群聊历史查询响应
+message QueryGroupChatHistoryResponse {
+  int32 errcode = 1;
+  int32 groupid = 2;
+  repeated ChatHistoryItem history = 3;
+}

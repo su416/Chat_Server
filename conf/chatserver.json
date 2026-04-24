@@ -1,0 +1,29 @@
+{ 
+  "server": {
+    "ip": "127.0.0.1",
+    "port": 6000,
+    "thread_num": 4,
+    "name": "ChatServer"
+  },
+  "mysql": {
+    "host": "127.0.0.1",
+    "port": 3306,
+    "user": "root",
+    "password": "123456",
+    "dbname": "chat",
+    "charset": "utf8"
+  },
+  "redis": {
+    "host": "127.0.0.1",
+    "port": 6379
+  },
+  "protocol": {
+    "use_protobuf_history": true
+  },
+  "log": {
+    "level": "INFO"
+  },
+  "business": {
+    "max_history_count": 50
+  }
+}

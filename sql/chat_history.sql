@@ -1,0 +1,10 @@
+use chat;
+
+create table if not exists chatmessage (
+    id bigint primary key auto_increment,
+    fromid int not null,
+    toid int default null,
+    groupid int default null,
+    msg varchar(1000) not null,
+    send_time datetime not null default current_timestamp
+);
