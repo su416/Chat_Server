@@ -15,6 +15,10 @@ RECEIVER_ID = 12
 CONCURRENCY = 10
 MESSAGES_PER_USER = 20
 
+# 超时配置
+CONNECT_TIMEOUT = 5.0
+LOGIN_RECV_TIMEOUT = 8.0
+
 # 协议约定
 LOGIN_MSG = 1
 REG_MSG = 4
@@ -28,7 +32,7 @@ def send_json(sock: socket.socket, obj: dict) -> None:
     sock.sendall(data)
 
 
-def recv_one_json(sock: socket.socket, timeout: float = 3.0) -> dict:
+def recv_one_json(sock: socket.socket, timeout: float = 5.0) -> dict:
     sock.settimeout(timeout)
     data = b""
 
@@ -39,13 +43,13 @@ def recv_one_json(sock: socket.socket, timeout: float = 3.0) -> dict:
 
         data += chunk
 
-        # 兼容未来如果服务端加了 '\0'
+        # 兼容服务端带 '\0' 的情况
         trimmed = data.rstrip(b"\0")
 
         try:
             return json.loads(trimmed.decode("utf-8"))
         except json.JSONDecodeError:
-            # 还没收完整，继续收
+            # 可能还没收完整，继续收
             continue
 
     if not data:
@@ -53,17 +57,18 @@ def recv_one_json(sock: socket.socket, timeout: float = 3.0) -> dict:
 
     return json.loads(data.rstrip(b"\0").decode("utf-8"))
 
+
 def register_user(index: int) -> Tuple[int, str]:
     username = f"{RUN_ID}_user_{index}"
     password = "123456"
 
-    with socket.create_connection((HOST, PORT), timeout=3) as sock:
+    with socket.create_connection((HOST, PORT), timeout=CONNECT_TIMEOUT) as sock:
         send_json(sock, {
             "msgid": REG_MSG,
             "name": username,
             "password": password,
         })
-        resp = recv_one_json(sock)
+        resp = recv_one_json(sock, timeout=LOGIN_RECV_TIMEOUT)
 
     if resp.get("errno") != 0:
         raise RuntimeError(f"register failed for {username}: {resp}")
@@ -72,19 +77,21 @@ def register_user(index: int) -> Tuple[int, str]:
 
 
 def worker(user_id: int, password: str, index: int, results: List[bool]) -> None:
+    phase = "init"
     try:
-        with socket.create_connection((HOST, PORT), timeout=3) as sock:
-            # 登录
+        phase = "connect"
+        with socket.create_connection((HOST, PORT), timeout=CONNECT_TIMEOUT) as sock:
+            phase = "login"
             send_json(sock, {
                 "msgid": LOGIN_MSG,
                 "id": user_id,
                 "password": password,
             })
-            resp = recv_one_json(sock)
+            resp = recv_one_json(sock, timeout=LOGIN_RECV_TIMEOUT)
             if resp.get("errno") != 0:
                 raise RuntimeError(f"login failed for {user_id}: {resp}")
 
-            # 发消息
+            phase = "send"
             for j in range(MESSAGES_PER_USER):
                 msg = f"{RUN_ID}_u{index}_m{j}"
                 now = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
@@ -99,7 +106,7 @@ def worker(user_id: int, password: str, index: int, results: List[bool]) -> None
 
         results[index] = True
     except Exception as e:
-        print(f"[worker {index}] error: {e}")
+        print(f"[worker {index}] phase={phase} error: {e}")
         results[index] = False
 
 
@@ -117,7 +124,7 @@ def main() -> None:
         print(f"  worker {i}: user_id={uid}")
 
     results = [False] * CONCURRENCY
-    threads = []
+    threads: List[threading.Thread] = []
 
     start = time.time()
 
@@ -132,18 +139,22 @@ def main() -> None:
     end = time.time()
 
     success_workers = sum(1 for x in results if x)
-    total_messages = CONCURRENCY * MESSAGES_PER_USER
+    requested_messages = CONCURRENCY * MESSAGES_PER_USER
+    success_messages = success_workers * MESSAGES_PER_USER
+    failed_workers = CONCURRENCY - success_workers
     elapsed = end - start
-    avg = elapsed / total_messages if total_messages else 0.0
+    avg = elapsed / success_messages if success_messages else 0.0
 
     print("\n===== RESULT =====")
     print(f"run_id={RUN_ID}")
     print(f"concurrency={CONCURRENCY}")
     print(f"messages_per_user={MESSAGES_PER_USER}")
-    print(f"total_messages={total_messages}")
+    print(f"requested_messages={requested_messages}")
     print(f"success_workers={success_workers}/{CONCURRENCY}")
+    print(f"failed_workers={failed_workers}")
+    print(f"success_messages={success_messages}")
     print(f"elapsed_seconds={elapsed:.4f}")
-    print(f"avg_seconds_per_message={avg:.6f}")
+    print(f"avg_seconds_per_success_message={avg:.6f}")
     print("==================")
 
     print("\nUse this SQL to verify:")
