@@ -1,7 +1,6 @@
 #include "offlinemessagemodel.hpp"
 #include "db.h"
-#include <memory>
-#include <cstdio>
+#include <cstring>
 
 // 存储用户的离线消息
 void OfflineMsgModel::insert(int userid, string msg)
@@ -12,23 +11,31 @@ void OfflineMsgModel::insert(int userid, string msg)
         return;
     }
 
-    // 对消息内容做转义，避免单引号等特殊字符破坏 SQL
-    unique_ptr<char[]> escapeMsg(new char[msg.size() * 2 + 1]);
-    mysql_real_escape_string(mysql.getConnection(), escapeMsg.get(), msg.c_str(), msg.size());
+    const string sql = "insert into offlinemessage(userid, message) values(?, ?)";
 
-    char sql[4096] = {0};
-    snprintf(sql, sizeof(sql),
-             "insert into offlinemessage values(%d, '%s')",
-             userid, escapeMsg.get());
+    MYSQL_BIND bind[2];
+    memset(bind, 0, sizeof(bind));
 
-    mysql.update(sql);
+    // 参数1：userid
+    bind[0].buffer_type = MYSQL_TYPE_LONG;
+    bind[0].buffer = reinterpret_cast<char*>(&userid);
+    bind[0].is_unsigned = false;
+
+    // 参数2：message
+    unsigned long msgLength = static_cast<unsigned long>(msg.size());
+    bind[1].buffer_type = MYSQL_TYPE_STRING;
+    bind[1].buffer = const_cast<char*>(msg.c_str());
+    bind[1].buffer_length = msgLength;
+    bind[1].length = &msgLength;
+
+    mysql.executePrepared(sql, bind, 2);
 }
 
 // 删除用户的离线消息
 void OfflineMsgModel::remove(int userid)
 {
     char sql[1024] = {0};
-    snprintf(sql, sizeof(sql), "delete from offlinemessage where userid=%d", userid);
+    sprintf(sql, "delete from offlinemessage where userid=%d", userid);
 
     MySQL mysql;
     if (mysql.connect())
@@ -41,7 +48,7 @@ void OfflineMsgModel::remove(int userid)
 vector<string> OfflineMsgModel::query(int userid)
 {
     char sql[1024] = {0};
-    snprintf(sql, sizeof(sql), "select message from offlinemessage where userid = %d", userid);
+    sprintf(sql, "select message from offlinemessage where userid = %d", userid);
 
     vector<string> vec;
     MySQL mysql;
