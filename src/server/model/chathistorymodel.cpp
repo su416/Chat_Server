@@ -2,7 +2,7 @@
 #include "db.h"
 #include "json.hpp"
 #include <cstdio>
-#include <memory>
+#include <cstring>
 
 using json = nlohmann::json;
 
@@ -15,16 +15,28 @@ void ChatHistoryModel::insertOneChat(int fromid, int toid, const string& msg)
         return;
     }
 
-    // 对消息内容做转义，避免单引号等特殊字符破坏 SQL
-    unique_ptr<char[]> escapeMsg(new char[msg.size() * 2 + 1]);
-    mysql_real_escape_string(mysql.getConnection(), escapeMsg.get(), msg.c_str(), msg.size());
+    const string sql =
+        "insert into chatmessage(fromid, toid, groupid, msg) values(?, ?, null, ?)";
 
-    char sql[4096] = {0};
-    snprintf(sql, sizeof(sql),
-             "insert into chatmessage(fromid, toid, groupid, msg) values(%d, %d, null, '%s')",
-             fromid, toid, escapeMsg.get());
+    MYSQL_BIND bind[3];
+    memset(bind, 0, sizeof(bind));
 
-    mysql.update(sql);
+    // 参数1：fromid
+    bind[0].buffer_type = MYSQL_TYPE_LONG;
+    bind[0].buffer = reinterpret_cast<char*>(&fromid);
+
+    // 参数2：toid
+    bind[1].buffer_type = MYSQL_TYPE_LONG;
+    bind[1].buffer = reinterpret_cast<char*>(&toid);
+
+    // 参数3：msg
+    unsigned long msgLength = static_cast<unsigned long>(msg.size());
+    bind[2].buffer_type = MYSQL_TYPE_STRING;
+    bind[2].buffer = const_cast<char*>(msg.c_str());
+    bind[2].buffer_length = msgLength;
+    bind[2].length = &msgLength;
+
+    mysql.executePrepared(sql, bind, 3);
 }
 
 // 存储群聊消息
@@ -36,16 +48,28 @@ void ChatHistoryModel::insertGroupChat(int fromid, int groupid, const string& ms
         return;
     }
 
-    // 对消息内容做转义，避免单引号等特殊字符破坏 SQL
-    unique_ptr<char[]> escapeMsg(new char[msg.size() * 2 + 1]);
-    mysql_real_escape_string(mysql.getConnection(), escapeMsg.get(), msg.c_str(), msg.size());
+    const string sql =
+        "insert into chatmessage(fromid, toid, groupid, msg) values(?, null, ?, ?)";
 
-    char sql[4096] = {0};
-    snprintf(sql, sizeof(sql),
-             "insert into chatmessage(fromid, toid, groupid, msg) values(%d, null, %d, '%s')",
-             fromid, groupid, escapeMsg.get());
+    MYSQL_BIND bind[3];
+    memset(bind, 0, sizeof(bind));
 
-    mysql.update(sql);
+    // 参数1：fromid
+    bind[0].buffer_type = MYSQL_TYPE_LONG;
+    bind[0].buffer = reinterpret_cast<char*>(&fromid);
+
+    // 参数2：groupid
+    bind[1].buffer_type = MYSQL_TYPE_LONG;
+    bind[1].buffer = reinterpret_cast<char*>(&groupid);
+
+    // 参数3：msg
+    unsigned long msgLength = static_cast<unsigned long>(msg.size());
+    bind[2].buffer_type = MYSQL_TYPE_STRING;
+    bind[2].buffer = const_cast<char*>(msg.c_str());
+    bind[2].buffer_length = msgLength;
+    bind[2].length = &msgLength;
+
+    mysql.executePrepared(sql, bind, 3);
 }
 
 // 查询某个用户最近的单聊历史消息
