@@ -1,192 +1,347 @@
 #!/usr/bin/env python3
+"""
+群聊压测脚本 V2
+- 逐群大小档位执行：5 / 20 / 50 人
+- 每档测试两个场景：
+  A) 全部离线：发送者一人在线，其余离线，测量扇出到离线存储的吞吐
+  B) 混合在线：部分成员在线接收，测量端到端扇出延迟
+- 多并发梯度自动执行，生成 JSON 基线报告
+"""
+
 import json
 import socket
+import threading
 import time
-from typing import List, Tuple
+import os
+import sys
 
-HOST = "127.0.0.1"
-PORT = 6000
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from bench_common import (
+    HOST, PORT, CONNECT_TIMEOUT, RECV_TIMEOUT,
+    LOGIN_MSG, REG_MSG, CREATE_GROUP_MSG, ADD_GROUP_MSG, GROUP_CHAT_MSG,
+    send_json, recv_one_json, register_user, login,
+    compute_stats, print_result,
+)
 
-# 压测规模
-GROUP_SIZE = 5               # 群总人数（含发送者）
-MESSAGES_PER_SENDER = 100    # 发送者发多少条群消息
+RUN_ID = f"benchgc_{int(time.time())}"
+OUTPUT_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "docs", "bench_results")
 
-# 超时配置
-CONNECT_TIMEOUT = 5.0
-RECV_TIMEOUT = 8.0
-
-# 协议消息号（按你当前项目约定）
-LOGIN_MSG = 1
-REG_MSG = 4
-CREATE_GROUP_MSG = 8
-ADD_GROUP_MSG = 9
-GROUP_CHAT_MSG = 10
-
-RUN_ID = f"bench_group_{int(time.time())}"
+# ========== 可调参数 ==========
+GROUP_SIZES = [5, 20, 50]          # 逐群大小测试
+MESSAGES_PER_GROUP = 200           # 每个群发送的消息数
+ONLINE_RATIO = 0.2                 # 混合在线场景在线比例 (20%)
+WARMUP_RATIO = 0.1
 
 
-def send_json(sock: socket.socket, obj: dict) -> None:
-    data = json.dumps(obj, ensure_ascii=False).encode("utf-8") + b"\0"
-    sock.sendall(data)
+def ensure_output_dir():
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 
-def recv_one_json(sock: socket.socket, timeout: float = RECV_TIMEOUT) -> dict:
-    sock.settimeout(timeout)
-    data = b""
-
-    while True:
-        chunk = sock.recv(4096)
-        if not chunk:
-            break
-
-        data += chunk
-        trimmed = data.rstrip(b"\0")
-
-        try:
-            return json.loads(trimmed.decode("utf-8"))
-        except json.JSONDecodeError:
-            continue
-
-    if not data:
-        return {}
-
-    return json.loads(data.rstrip(b"\0").decode("utf-8"))
-
-
-def register_user(index: int) -> Tuple[int, str, str]:
-    username = f"{RUN_ID}_user_{index}"
-    password = "123456"
-
+def create_and_populate_group(owner_id: int, owner_pwd: str, member_ids: list,
+                              member_pwds: list, group_name: str) -> int:
+    """创建群并让所有成员加入，返回 group_id。所有成员加入后断开（离线状态）。"""
+    # owner 登录并建群
     with socket.create_connection((HOST, PORT), timeout=CONNECT_TIMEOUT) as sock:
+        login(sock, owner_id, owner_pwd)
         send_json(sock, {
-            "msgid": REG_MSG,
-            "name": username,
-            "password": password,
+            "msgid": CREATE_GROUP_MSG,
+            "id": owner_id,
+            "groupname": group_name,
+            "groupdesc": f"benchmark group {group_name}",
         })
         resp = recv_one_json(sock)
+        if resp is None or resp.get("errno") != 0:
+            raise RuntimeError(f"create group failed: {resp}")
 
-    if resp.get("errno") != 0:
-        raise RuntimeError(f"register failed for {username}: {resp}")
+    group_id = resp["groupid"]
 
-    return resp["id"], username, password
-
-
-def login(sock: socket.socket, user_id: int, password: str) -> dict:
-    send_json(sock, {
-        "msgid": LOGIN_MSG,
-        "id": user_id,
-        "password": password,
-    })
-    resp = recv_one_json(sock)
-    if resp.get("errno") != 0:
-        raise RuntimeError(f"login failed for {user_id}: {resp}")
-    return resp
-
-
-def create_group(sock: socket.socket, owner_id: int) -> Tuple[int, str]:
-    group_name = f"{RUN_ID}_group"
-    group_desc = "group benchmark"
-
-    send_json(sock, {
-        "msgid": CREATE_GROUP_MSG,
-        "id": owner_id,
-        "groupname": group_name,
-        "groupdesc": group_desc,
-    })
-    resp = recv_one_json(sock)
-    if resp.get("errno") != 0:
-        raise RuntimeError(f"create group failed: {resp}")
-
-    group_id = resp.get("groupid")
-    if not group_id:
-        raise RuntimeError(f"create group ack missing groupid: {resp}")
-
-    return group_id, group_name
-
-
-def join_group(sock: socket.socket, user_id: int, group_id: int) -> None:
-    send_json(sock, {
-        "msgid": ADD_GROUP_MSG,
-        "id": user_id,
-        "groupid": group_id,
-    })
-    resp = recv_one_json(sock)
-    if resp.get("errno") != 0:
-        raise RuntimeError(f"join group failed for user {user_id}: {resp}")
-
-
-def main() -> None:
-    print(f"RUN_ID = {RUN_ID}")
-    print("registering users...")
-
-    users: List[Tuple[int, str, str]] = []
-    for i in range(GROUP_SIZE):
-        uid, uname, pwd = register_user(i)
-        users.append((uid, uname, pwd))
-
-    print("registered users:")
-    for i, (uid, uname, _) in enumerate(users):
-        print(f"  member {i}: user_id={uid}, username={uname}")
-
-    owner_id, owner_name, owner_pwd = users[0]
-
-    # 1. owner 登录并建群
-    with socket.create_connection((HOST, PORT), timeout=CONNECT_TIMEOUT) as owner_sock:
-        login(owner_sock, owner_id, owner_pwd)
-        group_id, group_name = create_group(owner_sock, owner_id)
-        print(f"created group: group_id={group_id}, group_name={group_name}")
-
-    # 2. 其他成员逐个登录并加群，然后断开，保持离线
-    for uid, uname, pwd in users[1:]:
+    # 其他成员逐个登录、加群、断开
+    for uid, pwd in zip(member_ids, member_pwds):
         with socket.create_connection((HOST, PORT), timeout=CONNECT_TIMEOUT) as sock:
             login(sock, uid, pwd)
-            join_group(sock, uid, group_id)
-            print(f"joined group: user_id={uid}, username={uname}")
+            send_json(sock, {"msgid": ADD_GROUP_MSG, "id": uid, "groupid": group_id})
+            resp = recv_one_json(sock)
+            if resp is None or resp.get("errno") != 0:
+                raise RuntimeError(f"join group failed for {uid}: {resp}")
 
-    # 给服务端一点时间把断开连接的成员状态置为 offline
+    return group_id
+
+
+# ==================== 场景 A：全部离线扇出 ====================
+
+def run_all_offline(group_size: int, messages: int) -> dict:
+    """
+    1 个发送者在线的群，其余 group_size-1 人离线。
+    所有消息扇出到线下存储。
+    """
+    print(f"\n{'='*60}")
+    print(f"[group all-offline] group_size={group_size}, messages={messages}")
+    print(f"{'='*60}")
+
+    # 注册成员
+    owner_id, owner_name, owner_pwd = register_user(f"{RUN_ID}_ao", "owner")
+    member_ids = []
+    member_pwds = []
+    for i in range(1, group_size):
+        mid, _, mpwd = register_user(f"{RUN_ID}_ao", f"m{i}")
+        member_ids.append(mid)
+        member_pwds.append(mpwd)
+    print(f"  registered {group_size} users")
+
+    # 创建群 + 所有人加入
+    group_id = create_and_populate_group(
+        owner_id, owner_pwd, member_ids, member_pwds,
+        f"{RUN_ID}_ao_g",
+    )
+    print(f"  group_id={group_id}, all members joined (all now offline)")
+
     time.sleep(0.5)
 
-    # 3. owner 再次登录，单人在线发送群消息
-    start = time.time()
+    # owner 登录发消息
+    send_times = []
 
-    with socket.create_connection((HOST, PORT), timeout=CONNECT_TIMEOUT) as sender_sock:
-        login(sender_sock, owner_id, owner_pwd)
+    with socket.create_connection((HOST, PORT), timeout=CONNECT_TIMEOUT) as sock:
+        login(sock, owner_id, owner_pwd)
 
-        for i in range(MESSAGES_PER_SENDER):
-            msg = f"{RUN_ID}_m{i}"
-            now = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
-            send_json(sender_sock, {
+        send_start = time.perf_counter()
+        for j in range(messages):
+            t0 = time.perf_counter()
+            msg = {
                 "msgid": GROUP_CHAT_MSG,
                 "id": owner_id,
                 "groupid": group_id,
                 "name": owner_name,
-                "msg": msg,
-                "time": now,
+                "msg": f"{RUN_ID}_ao_m{j}",
+                "bench_ts": t0,
+                "time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+            }
+            send_json(sock, msg)
+            send_times.append(time.perf_counter() - t0)
+        send_end = time.perf_counter()
+
+    warmup_skip = max(1, int(messages * WARMUP_RATIO))
+    measured = send_times[warmup_skip:]
+    elapsed = send_end - send_start
+    qps = messages / elapsed if elapsed > 0 else 0.0
+    latencies_ms = [t * 1000.0 for t in measured]
+
+    expected_offline = messages * (group_size - 1)
+    expected_history = messages
+
+    result = {
+        "group_size": group_size,
+        "scenario": "group_all_offline",
+        "offline_recipients": group_size - 1,
+        "total_messages": messages,
+        "expected_offline_rows": expected_offline,
+        "expected_history_rows": expected_history,
+        "qps": round(qps, 1),
+        "elapsed_seconds": round(elapsed, 3),
+        "latency": compute_stats(latencies_ms),
+        "group_id": group_id,
+    }
+    print_result("group all-offline result", result)
+    print(f"  offline_fan_out: {group_size - 1} members -> {expected_offline} total offline inserts expected")
+    return result
+
+
+# ==================== 场景 B：混合在线扇出 ====================
+
+def _group_receiver(user_id: int, password: str, expected_msgs: int,
+                    latencies: list, errors: list, ready_event: threading.Event):
+    """群消息接收者线程"""
+    sock = None
+    try:
+        sock = socket.create_connection((HOST, PORT), timeout=CONNECT_TIMEOUT)
+        login(sock, user_id, password)
+        ready_event.set()
+
+        received = 0
+        while received < expected_msgs:
+            msg = recv_one_json(sock, timeout=RECV_TIMEOUT)
+            if msg is None:
+                break
+            if msg.get("msgid") != GROUP_CHAT_MSG:
+                continue
+            send_ts = msg.get("bench_ts", 0.0)
+            if send_ts > 0:
+                latencies.append((time.perf_counter() - send_ts) * 1000.0)
+            received += 1
+    except Exception as e:
+        errors.append(f"[grp recv u{user_id}] {e}")
+    finally:
+        if sock:
+            try:
+                sock.close()
+            except Exception:
+                pass
+
+
+def run_mixed_online(group_size: int, messages: int) -> dict:
+    """
+    group_size 人群，约 online_ratio 比例在线（含发送者）。
+    在线成员通过 TCP 接收，离线成员走线下存储。
+    """
+    online_count = max(2, int(group_size * ONLINE_RATIO))  # 至少 2 个在线（1 发 + 1 收）
+    print(f"\n{'='*60}")
+    print(f"[group mixed-online] group_size={group_size}, online={online_count}, messages={messages}")
+    print(f"{'='*60}")
+
+    # 注册 owner + member_ids[0..online_count-2] 在线，其余离线
+    owner_id, owner_name, owner_pwd = register_user(f"{RUN_ID}_mo", "owner")
+    all_member_ids = []
+    all_member_pwds = []
+    for i in range(1, group_size):
+        mid, _, mpwd = register_user(f"{RUN_ID}_mo", f"m{i}")
+        all_member_ids.append(mid)
+        all_member_pwds.append(mpwd)
+
+    # 创建群 + 所有成员加入
+    group_id = create_and_populate_group(
+        owner_id, owner_pwd, all_member_ids, all_member_pwds,
+        f"{RUN_ID}_mo_g",
+    )
+    print(f"  group_id={group_id}, all members joined (now offline)")
+
+    time.sleep(0.5)
+
+    # 挑选在线成员（前 online_count-1 个，加上 owner 就是 online_count 个在线）
+    online_members = all_member_ids[:online_count - 1]
+    online_pwds = all_member_pwds[:online_count - 1]
+
+    # 启动在线接收者
+    recv_latencies = [[] for _ in range(len(online_members))]
+    recv_errors = []
+    ready_events = [threading.Event() for _ in range(len(online_members))]
+
+    recv_threads = []
+    for i, (mid, mpwd) in enumerate(zip(online_members, online_pwds)):
+        t = threading.Thread(
+            target=_group_receiver,
+            args=(mid, mpwd, messages, recv_latencies[i], recv_errors, ready_events[i]),
+            daemon=True,
+        )
+        t.start()
+        recv_threads.append(t)
+
+    for i, ev in enumerate(ready_events):
+        if not ev.wait(timeout=30):
+            print(f"  WARNING: receiver {i} not ready")
+
+    # owner 登录发消息
+    sock = None
+    try:
+        sock = socket.create_connection((HOST, PORT), timeout=CONNECT_TIMEOUT)
+        login(sock, owner_id, owner_pwd)
+
+        send_start = time.perf_counter()
+        for j in range(messages):
+            msg = {
+                "msgid": GROUP_CHAT_MSG,
+                "id": owner_id,
+                "groupid": group_id,
+                "name": owner_name,
+                "msg": f"{RUN_ID}_mo_m{j}",
+                "bench_ts": time.perf_counter(),
+                "time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+            }
+            send_json(sock, msg)
+        send_end = time.perf_counter()
+    finally:
+        if sock:
+            sock.close()
+
+    # 等待接收者收完
+    for t in recv_threads:
+        t.join(timeout=15)
+
+    # 汇总延迟
+    warmup_skip = max(1, int(messages * WARMUP_RATIO))
+    all_latencies = []
+    for bucket in recv_latencies:
+        if len(bucket) > warmup_skip:
+            all_latencies.extend(bucket[warmup_skip:])
+
+    elapsed = send_end - send_start
+    total_received = len(all_latencies)
+    expected_online_received = len(online_members) * messages
+    # 离线部分
+    offline_count = group_size - 1 - len(online_members)
+    expected_offline_rows = offline_count * messages if offline_count > 0 else 0
+
+    result = {
+        "group_size": group_size,
+        "scenario": "group_mixed_online",
+        "online_members": online_count,
+        "offline_recipients": offline_count,
+        "total_messages": messages,
+        "expected_online_received": expected_online_received,
+        "actual_online_received": total_received,
+        "expected_offline_rows": expected_offline_rows,
+        "qps": round(messages / elapsed, 1) if elapsed > 0 else 0.0,
+        "elapsed_seconds": round(elapsed, 3),
+        "latency": compute_stats(all_latencies),
+        "group_id": group_id,
+    }
+    print_result("group mixed-online result", result)
+    if recv_errors:
+        for e in recv_errors[:3]:
+            print(f"  [error] {e}")
+    return result
+
+
+# ==================== 主流程 ====================
+
+def main():
+    ensure_output_dir()
+    print(f"RUN_ID = {RUN_ID}")
+    print(f"Group sizes: {GROUP_SIZES}")
+
+    all_results = {
+        "run_id": RUN_ID,
+        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+        "server": f"{HOST}:{PORT}",
+        "group_all_offline": [],
+        "group_mixed_online": [],
+    }
+
+    for group_size in GROUP_SIZES:
+        # 场景 A：全部离线扇出
+        try:
+            r = run_all_offline(group_size, MESSAGES_PER_GROUP)
+            all_results["group_all_offline"].append(r)
+        except Exception as e:
+            print(f"\n  [FATAL] all-offline group_size={group_size}: {e}")
+            all_results["group_all_offline"].append({
+                "group_size": group_size, "scenario": "group_all_offline", "error": str(e),
             })
 
-    end = time.time()
+        # 场景 B：混合在线
+        try:
+            r = run_mixed_online(group_size, MESSAGES_PER_GROUP)
+            all_results["group_mixed_online"].append(r)
+        except Exception as e:
+            print(f"\n  [FATAL] mixed-online group_size={group_size}: {e}")
+            all_results["group_mixed_online"].append({
+                "group_size": group_size, "scenario": "group_mixed_online", "error": str(e),
+            })
 
-    elapsed = end - start
-    success_messages = MESSAGES_PER_SENDER
-    expected_history_rows = MESSAGES_PER_SENDER
-    expected_offline_rows = MESSAGES_PER_SENDER * (GROUP_SIZE - 1)
-    avg = elapsed / success_messages if success_messages else 0.0
+    # 输出报告
+    output_file = os.path.join(OUTPUT_DIR, f"{RUN_ID}.json")
+    with open(output_file, "w", encoding="utf-8") as f:
+        json.dump(all_results, f, indent=2, ensure_ascii=False)
 
-    print("\n===== RESULT =====")
-    print(f"run_id={RUN_ID}")
-    print(f"group_id={group_id}")
-    print(f"group_size={GROUP_SIZE}")
-    print(f"messages_per_sender={MESSAGES_PER_SENDER}")
-    print(f"success_messages={success_messages}")
-    print(f"expected_history_rows={expected_history_rows}")
-    print(f"expected_offline_rows={expected_offline_rows}")
-    print(f"elapsed_seconds={elapsed:.4f}")
-    print(f"avg_seconds_per_message={avg:.6f}")
-    print("==================")
-
-    print("\nUse these SQLs to verify:")
-    print(f"select count(*) from chatmessage where msg like '{RUN_ID}%';")
-    print(f"select count(*) from offlinemessage where message like '%{RUN_ID}%';")
+    print(f"\n{'='*60}")
+    print(f"Report saved to: {output_file}")
+    print(f"Run ID: {RUN_ID}")
+    print(f"\nSummary:")
+    for scenario in ["group_all_offline", "group_mixed_online"]:
+        for r in all_results[scenario]:
+            if "error" not in r:
+                lat = r.get("latency", {})
+                print(f"  {r['scenario']:20s} | size={r['group_size']:3d} | "
+                      f"qps={r['qps']:8.1f} | "
+                      f"p50={lat.get('p50_ms', 0):6.1f}ms p99={lat.get('p99_ms', 0):6.1f}ms")
 
 
 if __name__ == "__main__":

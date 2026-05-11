@@ -1,166 +1,361 @@
 #!/usr/bin/env python3
+"""
+单聊压测脚本 V2
+- 场景 A：在线到在线（配对的发送者与接收者同时在线，测量端到端延迟）
+- 场景 B：在线到离线（发送者发送给离线接收者，测量线下存储路径吞吐）
+- 多并发梯度自动执行，生成 JSON 基线报告
+"""
+
 import json
 import socket
 import threading
 import time
-from typing import List, Tuple
+import os
+import sys
 
-HOST = "127.0.0.1"
-PORT = 6000
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from bench_common import (
+    HOST, PORT, CONNECT_TIMEOUT, RECV_TIMEOUT,
+    LOGIN_MSG, REG_MSG, ONE_CHAT_MSG,
+    send_json, recv_one_json, register_user, login,
+    compute_stats, print_result,
+)
 
-# 改成你的离线接收者 id
-RECEIVER_ID = 12
+RUN_ID = f"bench1c_{int(time.time())}"
+OUTPUT_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "docs", "bench_results")
 
-# 压测规模
-CONCURRENCY = 10
-MESSAGES_PER_USER = 20
-
-# 超时配置
-CONNECT_TIMEOUT = 5.0
-LOGIN_RECV_TIMEOUT = 8.0
-
-# 协议约定
-LOGIN_MSG = 1
-REG_MSG = 4
-ONE_CHAT_MSG = 6
-
-RUN_ID = f"bench_{int(time.time())}"
+# ========== 可调参数 ==========
+# 多个并发梯度依次执行
+CONCURRENCY_LEVELS = [10, 50, 100, 200, 500]
+MESSAGES_PER_PAIR = 50       # 在线场景每对交换消息数
+MESSAGES_PER_SENDER = 100    # 离线场景每发送者消息数
+WARMUP_RATIO = 0.1           # 前 10% 消息不计入统计
 
 
-def send_json(sock: socket.socket, obj: dict) -> None:
-    data = json.dumps(obj, ensure_ascii=False).encode("utf-8") + b"\0"
-    sock.sendall(data)
+def ensure_output_dir():
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 
-def recv_one_json(sock: socket.socket, timeout: float = 5.0) -> dict:
-    sock.settimeout(timeout)
-    data = b""
+# ==================== 场景 A：在线到在线 ====================
 
-    while True:
-        chunk = sock.recv(4096)
-        if not chunk:
-            break
-
-        data += chunk
-
-        # 兼容服务端带 '\0' 的情况
-        trimmed = data.rstrip(b"\0")
-
-        try:
-            return json.loads(trimmed.decode("utf-8"))
-        except json.JSONDecodeError:
-            # 可能还没收完整，继续收
-            continue
-
-    if not data:
-        return {}
-
-    return json.loads(data.rstrip(b"\0").decode("utf-8"))
-
-
-def register_user(index: int) -> Tuple[int, str]:
-    username = f"{RUN_ID}_user_{index}"
-    password = "123456"
-
-    with socket.create_connection((HOST, PORT), timeout=CONNECT_TIMEOUT) as sock:
-        send_json(sock, {
-            "msgid": REG_MSG,
-            "name": username,
-            "password": password,
-        })
-        resp = recv_one_json(sock, timeout=LOGIN_RECV_TIMEOUT)
-
-    if resp.get("errno") != 0:
-        raise RuntimeError(f"register failed for {username}: {resp}")
-
-    return resp["id"], password
-
-
-def worker(user_id: int, password: str, index: int, results: List[bool]) -> None:
-    phase = "init"
+def _receiver_thread(pair_idx: int, user_id: int, password: str,
+                     expected_msgs: int, latencies: list, errors: list,
+                     ready_event: threading.Event):
+    """接收者线程：保持长连接，收消息并计算延迟"""
+    sock = None
     try:
-        phase = "connect"
-        with socket.create_connection((HOST, PORT), timeout=CONNECT_TIMEOUT) as sock:
-            phase = "login"
-            send_json(sock, {
-                "msgid": LOGIN_MSG,
-                "id": user_id,
-                "password": password,
-            })
-            resp = recv_one_json(sock, timeout=LOGIN_RECV_TIMEOUT)
-            if resp.get("errno") != 0:
-                raise RuntimeError(f"login failed for {user_id}: {resp}")
+        sock = socket.create_connection((HOST, PORT), timeout=CONNECT_TIMEOUT)
+        login(sock, user_id, password)
+        ready_event.set()
+        sock.settimeout(RECV_TIMEOUT)
 
-            phase = "send"
-            for j in range(MESSAGES_PER_USER):
-                msg = f"{RUN_ID}_u{index}_m{j}"
-                now = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
-                send_json(sock, {
-                    "msgid": ONE_CHAT_MSG,
-                    "id": user_id,
-                    "toid": RECEIVER_ID,
-                    "name": f"{RUN_ID}_user_{index}",
-                    "msg": msg,
-                    "time": now,
-                })
-
-        results[index] = True
+        received = 0
+        while received < expected_msgs:
+            msg = recv_one_json(sock, timeout=RECV_TIMEOUT)
+            if msg is None:
+                break
+            if msg.get("msgid") != ONE_CHAT_MSG:
+                continue
+            send_ts = msg.get("bench_ts", 0.0)
+            if send_ts > 0:
+                latencies.append((time.perf_counter() - send_ts) * 1000.0)
+            received += 1
     except Exception as e:
-        print(f"[worker {index}] phase={phase} error: {e}")
-        results[index] = False
+        errors.append(f"[receiver p{pair_idx}] {e}")
+    finally:
+        if sock:
+            try:
+                sock.close()
+            except Exception:
+                pass
 
 
-def main() -> None:
-    print(f"RUN_ID = {RUN_ID}")
-    print("registering users...")
+def _sender_thread(pair_idx: int, user_id: int, password: str,
+                   receiver_id: int, messages: int, errors: list,
+                   start_barrier: threading.Barrier):
+    """发送者线程：连接、登录、发送 M 条消息、断开"""
+    sock = None
+    try:
+        sock = socket.create_connection((HOST, PORT), timeout=CONNECT_TIMEOUT)
+        login(sock, user_id, password)
+        # 等待所有发送者就绪
+        start_barrier.wait(timeout=30)
 
-    users: List[Tuple[int, str]] = []
-    for i in range(CONCURRENCY):
-        uid, pwd = register_user(i)
-        users.append((uid, pwd))
+        for j in range(messages):
+            msg = {
+                "msgid": ONE_CHAT_MSG,
+                "id": user_id,
+                "toid": receiver_id,
+                "name": f"bench_s{pair_idx}",
+                "msg": f"{RUN_ID}_oto_p{pair_idx}_m{j}",
+                "bench_ts": time.perf_counter(),
+                "time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+            }
+            send_json(sock, msg)
+    except Exception as e:
+        errors.append(f"[sender p{pair_idx}] {e}")
+    finally:
+        if sock:
+            try:
+                sock.close()
+            except Exception:
+                pass
 
-    print("registered users:")
-    for i, (uid, _) in enumerate(users):
-        print(f"  worker {i}: user_id={uid}")
 
-    results = [False] * CONCURRENCY
-    threads: List[threading.Thread] = []
+def run_online_to_online(concurrency: int, messages_per_pair: int) -> dict:
+    """
+    concurrency 个发送-接收对，同时在线。
+    发送方发完所有消息后断开，接收方计算每条消息的延迟。
+    """
+    print(f"\n{'='*60}")
+    print(f"[online-to-online] concurrency={concurrency}, msgs/pair={messages_per_pair}")
+    print(f"{'='*60}")
 
-    start = time.time()
+    # 1. 注册用户
+    pairs = []  # [(sid, spwd), (rid, rpwd)]
+    for i in range(concurrency):
+        sid, _, spwd = register_user(f"{RUN_ID}_oto", f"s{i}")
+        rid, _, rpwd = register_user(f"{RUN_ID}_oto", f"r{i}")
+        pairs.append(((sid, spwd), (rid, rpwd)))
+    print(f"  registered {len(pairs)} pairs")
 
-    for i, (uid, pwd) in enumerate(users):
-        t = threading.Thread(target=worker, args=(uid, pwd, i, results))
+    # 2. 启动接收者
+    receiver_latencies = [[] for _ in range(concurrency)]
+    receiver_errors = []
+    ready_events = [threading.Event() for _ in range(concurrency)]
+
+    recv_threads = []
+    for i, ((_, _), (rid, rpwd)) in enumerate(pairs):
+        t = threading.Thread(
+            target=_receiver_thread,
+            args=(i, rid, rpwd, messages_per_pair, receiver_latencies[i], receiver_errors, ready_events[i]),
+            daemon=True,
+        )
+        t.start()
+        recv_threads.append(t)
+
+    # 3. 等待所有接收者就绪
+    for i, ev in enumerate(ready_events):
+        if not ev.wait(timeout=30):
+            print(f"  WARNING: receiver {i} did not become ready")
+    print(f"  all receivers ready")
+
+    # 4. 启动发送者（同步起跑）
+    start_barrier = threading.Barrier(concurrency, timeout=30)
+    sender_errors = []
+
+    send_threads = []
+    for i, ((sid, spwd), (rid, _)) in enumerate(pairs):
+        t = threading.Thread(
+            target=_sender_thread,
+            args=(i, sid, spwd, rid, messages_per_pair, sender_errors, start_barrier),
+            daemon=True,
+        )
+        t.start()
+        send_threads.append(t)
+
+    # 5. 等待发送者完成
+    send_start = time.perf_counter()
+    for t in send_threads:
+        t.join(timeout=60)
+    send_end = time.perf_counter()
+
+    # 6. 等待接收者完成
+    for t in recv_threads:
+        t.join(timeout=10)
+
+    # 7. 汇总延迟
+    warmup_skip = max(1, int(messages_per_pair * WARMUP_RATIO))
+    all_latencies = []
+    for bucket in receiver_latencies:
+        if len(bucket) > warmup_skip:
+            all_latencies.extend(bucket[warmup_skip:])
+
+    total_messages = concurrency * messages_per_pair
+    success_messages = len(all_latencies)
+    failed_messages = total_messages - success_messages
+    elapsed = send_end - send_start
+    qps = total_messages / elapsed if elapsed > 0 else 0.0
+
+    result = {
+        "concurrency": concurrency,
+        "scenario": "online_to_online",
+        "total_messages": total_messages,
+        "success_messages": success_messages,
+        "failed_messages": failed_messages,
+        "qps": round(qps, 1),
+        "elapsed_seconds": round(elapsed, 3),
+        "latency": compute_stats(all_latencies),
+        "receiver_errors": len(receiver_errors),
+        "sender_errors": len(sender_errors),
+    }
+    print_result("online-to-online result", result)
+
+    if receiver_errors or sender_errors:
+        for e in (receiver_errors + sender_errors)[:5]:
+            print(f"  [error] {e}")
+
+    return result
+
+
+# ==================== 场景 B：在线到离线 ====================
+
+def _offline_sender_thread(user_id: int, password: str, receiver_id: int,
+                           messages: int, errors: list,
+                           start_barrier: threading.Barrier,
+                           send_times: list):
+    """发送者线程：所有消息发往离线接收者"""
+    sock = None
+    try:
+        sock = socket.create_connection((HOST, PORT), timeout=CONNECT_TIMEOUT)
+        login(sock, user_id, password)
+        start_barrier.wait(timeout=30)
+
+        for j in range(messages):
+            t0 = time.perf_counter()
+            msg = {
+                "msgid": ONE_CHAT_MSG,
+                "id": user_id,
+                "toid": receiver_id,
+                "name": f"bench_off{user_id}",
+                "msg": f"{RUN_ID}_otf_m{j}",
+                "bench_ts": t0,
+                "time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+            }
+            send_json(sock, msg)
+            send_times.append(time.perf_counter() - t0)
+    except Exception as e:
+        errors.append(f"[offline sender] {e}")
+    finally:
+        if sock:
+            try:
+                sock.close()
+            except Exception:
+                pass
+
+
+def run_online_to_offline(concurrency: int, messages_per_sender: int) -> dict:
+    """
+    concurrency 个发送者向 1 个离线接收者发消息。
+    测量线下存储路径的吞吐。
+    """
+    print(f"\n{'='*60}")
+    print(f"[online-to-offline] concurrency={concurrency}, msgs/sender={messages_per_sender}")
+    print(f"{'='*60}")
+
+    # 1. 注册 1 个接收者（永远不会登录）+ concurrency 个发送者
+    rid, _, rpwd = register_user(f"{RUN_ID}_otf", "receiver")
+    senders = []
+    for i in range(concurrency):
+        sid, _, spwd = register_user(f"{RUN_ID}_otf", f"s{i}")
+        senders.append((sid, spwd))
+    print(f"  registered receiver={rid}, {len(senders)} senders")
+
+    # 2. 启动所有发送者（同步起跑）
+    start_barrier = threading.Barrier(concurrency, timeout=30)
+    all_send_times = []  # 每条消息的 send_json 耗时
+    errors = []
+
+    threads = []
+    for sid, spwd in senders:
+        t = threading.Thread(
+            target=_offline_sender_thread,
+            args=(sid, spwd, rid, messages_per_sender, errors, start_barrier, all_send_times),
+            daemon=True,
+        )
         t.start()
         threads.append(t)
 
+    start = time.perf_counter()
     for t in threads:
-        t.join()
+        t.join(timeout=60)
+    end = time.perf_counter()
 
-    end = time.time()
+    warmup_skip = max(1, int(len(all_send_times) * WARMUP_RATIO))
+    measured = all_send_times[warmup_skip:]
 
-    success_workers = sum(1 for x in results if x)
-    requested_messages = CONCURRENCY * MESSAGES_PER_USER
-    success_messages = success_workers * MESSAGES_PER_USER
-    failed_workers = CONCURRENCY - success_workers
+    total_messages = concurrency * messages_per_sender
     elapsed = end - start
-    avg = elapsed / success_messages if success_messages else 0.0
+    qps = total_messages / elapsed if elapsed > 0 else 0.0
 
-    print("\n===== RESULT =====")
-    print(f"run_id={RUN_ID}")
-    print(f"concurrency={CONCURRENCY}")
-    print(f"messages_per_user={MESSAGES_PER_USER}")
-    print(f"requested_messages={requested_messages}")
-    print(f"success_workers={success_workers}/{CONCURRENCY}")
-    print(f"failed_workers={failed_workers}")
-    print(f"success_messages={success_messages}")
-    print(f"elapsed_seconds={elapsed:.4f}")
-    print(f"avg_seconds_per_success_message={avg:.6f}")
-    print("==================")
+    # send_times 是秒，转换为毫秒
+    latencies_ms = [t * 1000.0 for t in measured]
 
-    print("\nUse this SQL to verify:")
-    print(f"select count(*) from chatmessage where msg like '{RUN_ID}%';")
-    print("and:")
-    print(f"select count(*) from offlinemessage where message like '%{RUN_ID}%';")
+    result = {
+        "concurrency": concurrency,
+        "scenario": "online_to_offline",
+        "total_messages": total_messages,
+        "success_messages": len(measured),
+        "failed_messages": total_messages - len(measured),
+        "qps": round(qps, 1),
+        "elapsed_seconds": round(elapsed, 3),
+        "latency": compute_stats(latencies_ms),
+        "errors": len(errors),
+    }
+    print_result("online-to-offline result", result)
+
+    if errors:
+        for e in errors[:5]:
+            print(f"  [error] {e}")
+
+    return result
+
+
+# ==================== 主流程 ====================
+
+def main():
+    ensure_output_dir()
+    print(f"RUN_ID = {RUN_ID}")
+    print(f"Concurrency levels: {CONCURRENCY_LEVELS}")
+
+    all_results = {
+        "run_id": RUN_ID,
+        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+        "server": f"{HOST}:{PORT}",
+        "online_to_online": [],
+        "online_to_offline": [],
+    }
+
+    for concurrency in CONCURRENCY_LEVELS:
+        # 场景 A：在线到在线
+        try:
+            r = run_online_to_online(concurrency, MESSAGES_PER_PAIR)
+            all_results["online_to_online"].append(r)
+        except Exception as e:
+            print(f"\n  [FATAL] online-to-online concurrency={concurrency}: {e}")
+            all_results["online_to_online"].append({
+                "concurrency": concurrency, "scenario": "online_to_online",
+                "error": str(e),
+            })
+
+        # 场景 B：在线到离线
+        try:
+            r = run_online_to_offline(concurrency, MESSAGES_PER_SENDER)
+            all_results["online_to_offline"].append(r)
+        except Exception as e:
+            print(f"\n  [FATAL] online-to-offline concurrency={concurrency}: {e}")
+            all_results["online_to_offline"].append({
+                "concurrency": concurrency, "scenario": "online_to_offline",
+                "error": str(e),
+            })
+
+    # 输出汇总报告
+    output_file = os.path.join(OUTPUT_DIR, f"{RUN_ID}.json")
+    with open(output_file, "w", encoding="utf-8") as f:
+        json.dump(all_results, f, indent=2, ensure_ascii=False)
+
+    print(f"\n{'='*60}")
+    print(f"Report saved to: {output_file}")
+    print(f"Run ID: {RUN_ID}")
+    print(f"\nSummary:")
+    for scenario in ["online_to_online", "online_to_offline"]:
+        for r in all_results[scenario]:
+            if "error" not in r:
+                lat = r.get("latency", {})
+                print(f"  {r['scenario']:20s} | c={r['concurrency']:4d} | "
+                      f"qps={r['qps']:8.1f} | "
+                      f"p50={lat.get('p50_ms', 0):6.1f}ms p99={lat.get('p99_ms', 0):6.1f}ms | "
+                      f"success={r['success_messages']}/{r['total_messages']}")
 
 
 if __name__ == "__main__":
