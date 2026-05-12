@@ -27,20 +27,23 @@ def send_json(sock: socket.socket, obj: dict) -> None:
     sock.sendall(data)
 
 
+# TCP 粘包缓冲区：socket 是 C 扩展对象，不能动态加属性，用 id 做 key
+_recv_bufs: dict = {}
+
 def recv_one_json(sock: socket.socket, timeout: float = RECV_TIMEOUT) -> Optional[dict]:
     """从 socket 读取一条 \0 分隔的 JSON 消息。
     使用内部缓冲区处理 TCP 粘包：一次 recv 可能包含多条消息，
     剩余数据留在缓冲区供下次调用使用。"""
-    if not hasattr(sock, "_bench_buf"):
-        sock._bench_buf = b""
-
+    sid = id(sock)
+    buf = _recv_bufs.get(sid, b"")
     sock.settimeout(timeout)
 
     while True:
         # 先检查缓冲区中是否已有完整消息
-        parts = sock._bench_buf.split(b"\0", 1)
+        parts = buf.split(b"\0", 1)
         if len(parts) == 2:
-            sock._bench_buf = parts[1]
+            buf = parts[1]
+            _recv_bufs[sid] = buf
             try:
                 return json.loads(parts[0].decode("utf-8"))
             except json.JSONDecodeError:
@@ -50,15 +53,19 @@ def recv_one_json(sock: socket.socket, timeout: float = RECV_TIMEOUT) -> Optiona
         try:
             chunk = sock.recv(4096)
         except socket.timeout:
+            _recv_bufs.pop(sid, None)
             return None
         if not chunk:
             break
-        sock._bench_buf += chunk
+        buf += chunk
+        _recv_bufs[sid] = buf
 
-    if not sock._bench_buf:
+    if not buf:
+        _recv_bufs.pop(sid, None)
         return None
     # 连接关闭，尝试解析剩余数据
-    parts = sock._bench_buf.split(b"\0", 1)
+    parts = buf.split(b"\0", 1)
+    _recv_bufs.pop(sid, None)
     try:
         return json.loads(parts[0].decode("utf-8"))
     except json.JSONDecodeError:
