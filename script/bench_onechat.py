@@ -39,9 +39,9 @@ def ensure_output_dir():
 # ==================== 场景 A：在线到在线 ====================
 
 def _receiver_thread(pair_idx: int, user_id: int, password: str,
-                     expected_msgs: int, latencies: list, errors: list,
+                     expected_msgs: int, recv_stamps: list, errors: list,
                      ready_event: threading.Event):
-    """接收者线程：保持长连接，收消息并计算延迟"""
+    """接收者线程：保持长连接，收消息并记录接收时间戳"""
     sock = None
     try:
         sock = socket.create_connection((HOST, PORT), timeout=CONNECT_TIMEOUT)
@@ -56,9 +56,7 @@ def _receiver_thread(pair_idx: int, user_id: int, password: str,
                 break
             if msg.get("msgid") != ONE_CHAT_MSG:
                 continue
-            send_ts = msg.get("bench_ts", 0.0)
-            if send_ts > 0:
-                latencies.append((time.perf_counter() - send_ts) * 1000.0)
+            recv_stamps.append(time.perf_counter())
             received += 1
     except Exception as e:
         errors.append(f"[receiver p{pair_idx}] {e}")
@@ -72,7 +70,8 @@ def _receiver_thread(pair_idx: int, user_id: int, password: str,
 
 def _sender_thread(pair_idx: int, user_id: int, password: str,
                    receiver_id: int, messages: int, errors: list,
-                   start_barrier: threading.Barrier):
+                   start_barrier: threading.Barrier,
+                   send_stamps: list):
     """发送者线程：连接、登录、发送 M 条消息、断开"""
     sock = None
     try:
@@ -82,13 +81,13 @@ def _sender_thread(pair_idx: int, user_id: int, password: str,
         start_barrier.wait(timeout=30)
 
         for j in range(messages):
+            send_stamps.append(time.perf_counter())
             msg = {
                 "msgid": ONE_CHAT_MSG,
                 "id": user_id,
                 "toid": receiver_id,
                 "name": f"bench_s{pair_idx}",
                 "msg": f"{RUN_ID}_oto_p{pair_idx}_m{j}",
-                "bench_ts": time.perf_counter(),
                 "time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
             }
             send_json(sock, msg)
@@ -120,7 +119,8 @@ def run_online_to_online(concurrency: int, messages_per_pair: int) -> dict:
     print(f"  registered {len(pairs)} pairs")
 
     # 2. 启动接收者
-    receiver_latencies = [[] for _ in range(concurrency)]
+    send_stamps = [[] for _ in range(concurrency)]   # 每条消息的发送时间戳
+    recv_stamps = [[] for _ in range(concurrency)]   # 每条消息的接收时间戳
     receiver_errors = []
     ready_events = [threading.Event() for _ in range(concurrency)]
 
@@ -128,7 +128,7 @@ def run_online_to_online(concurrency: int, messages_per_pair: int) -> dict:
     for i, ((_, _), (rid, rpwd)) in enumerate(pairs):
         t = threading.Thread(
             target=_receiver_thread,
-            args=(i, rid, rpwd, messages_per_pair, receiver_latencies[i], receiver_errors, ready_events[i]),
+            args=(i, rid, rpwd, messages_per_pair, recv_stamps[i], receiver_errors, ready_events[i]),
             daemon=True,
         )
         t.start()
@@ -148,7 +148,7 @@ def run_online_to_online(concurrency: int, messages_per_pair: int) -> dict:
     for i, ((sid, spwd), (rid, _)) in enumerate(pairs):
         t = threading.Thread(
             target=_sender_thread,
-            args=(i, sid, spwd, rid, messages_per_pair, sender_errors, start_barrier),
+            args=(i, sid, spwd, rid, messages_per_pair, sender_errors, start_barrier, send_stamps[i]),
             daemon=True,
         )
         t.start()
@@ -160,22 +160,26 @@ def run_online_to_online(concurrency: int, messages_per_pair: int) -> dict:
         t.join(timeout=60)
     send_end = time.perf_counter()
 
-    # 6. 等待接收者完成
+    # 6. 等待接收者收完（在发送者结束后给额外宽限期）
+    grace_timeout = max(5, messages_per_pair * 0.1)
     for t in recv_threads:
-        t.join(timeout=10)
+        t.join(timeout=grace_timeout)
 
-    # 7. 汇总延迟
+    # 7. 按序号匹配 send/recv 时间戳，计算端到端延迟
     warmup_skip = max(1, int(messages_per_pair * WARMUP_RATIO))
     all_latencies = []
-    for bucket in receiver_latencies:
-        if len(bucket) > warmup_skip:
-            all_latencies.extend(bucket[warmup_skip:])
+    total_recv = 0
+    for pair_send, pair_recv in zip(send_stamps, recv_stamps):
+        total_recv += len(pair_recv)
+        n = min(len(pair_send), len(pair_recv))
+        for i in range(warmup_skip, n):
+            all_latencies.append((pair_recv[i] - pair_send[i]) * 1000.0)
 
     total_messages = concurrency * messages_per_pair
-    success_messages = len(all_latencies)
+    success_messages = total_recv
     failed_messages = total_messages - success_messages
     elapsed = send_end - send_start
-    qps = total_messages / elapsed if elapsed > 0 else 0.0
+    qps = success_messages / elapsed if elapsed > 0 else 0.0
 
     result = {
         "concurrency": concurrency,
@@ -219,7 +223,6 @@ def _offline_sender_thread(user_id: int, password: str, receiver_id: int,
                 "toid": receiver_id,
                 "name": f"bench_off{user_id}",
                 "msg": f"{RUN_ID}_otf_m{j}",
-                "bench_ts": t0,
                 "time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
             }
             send_json(sock, msg)

@@ -1,15 +1,12 @@
 #include "offlinemessagemodel.hpp"
 #include "db.h"
+#include "connectionpool.h"
 #include <cstring>
 
 // 存储用户的离线消息
 void OfflineMsgModel::insert(int userid, string msg)
 {
-    MySQL mysql;
-    if (!mysql.connect())
-    {
-        return;
-    }
+    auto mysql = ConnectionPool::instance()->getConnection();
 
     const string sql = "insert into offlinemessage(userid, message) values(?, ?)";
 
@@ -28,7 +25,7 @@ void OfflineMsgModel::insert(int userid, string msg)
     bind[1].buffer_length = msgLength;
     bind[1].length = &msgLength;
 
-    mysql.executePrepared(sql, bind, 2);
+    mysql->executePrepared(sql, bind, 2);
 }
 
 // 删除用户的离线消息
@@ -37,11 +34,8 @@ void OfflineMsgModel::remove(int userid)
     char sql[1024] = {0};
     sprintf(sql, "delete from offlinemessage where userid=%d", userid);
 
-    MySQL mysql;
-    if (mysql.connect())
-    {
-        mysql.update(sql);
-    }
+    auto mysql = ConnectionPool::instance()->getConnection();
+    mysql->update(sql);
 }
 
 // 查询用户的离线消息
@@ -51,20 +45,17 @@ vector<string> OfflineMsgModel::query(int userid)
     sprintf(sql, "select message from offlinemessage where userid = %d", userid);
 
     vector<string> vec;
-    MySQL mysql;
-    if (mysql.connect())
+    auto mysql = ConnectionPool::instance()->getConnection();
+    MYSQL_RES *res = mysql->query(sql);
+    if (res != nullptr)
     {
-        MYSQL_RES *res = mysql.query(sql);
-        if (res != nullptr)
+        MYSQL_ROW row;
+        while((row = mysql_fetch_row(res)) != nullptr)
         {
-            MYSQL_ROW row;
-            while((row = mysql_fetch_row(res)) != nullptr)
-            {
-                vec.push_back(row[0]);
-            }
-            mysql_free_result(res);
-            return vec;
+            vec.push_back(row[0]);
         }
+        mysql_free_result(res);
+        return vec;
     }
     return vec;
 }

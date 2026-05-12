@@ -1,12 +1,7 @@
 #include "db.h"
+#include "config.hpp"
 #include <muduo/base/Logging.h>
 #include <cstring>
-
-// 数据库配置信息
-static string server = "127.0.0.1";
-static string user = "root";
-static string password = "123456";
-static string dbname = "chat";
 
 // 初始化数据库连接
 MySQL::MySQL()
@@ -21,14 +16,29 @@ MySQL::~MySQL()
         mysql_close(_conn);
 }
 
-// 连接数据库
+// 连接数据库（从 Config 读取凭据）
 bool MySQL::connect()
 {
-    MYSQL *p = mysql_real_connect(_conn, server.c_str(), user.c_str(),
-                                  password.c_str(), dbname.c_str(), 3306, nullptr, 0);
+    auto& cfg = Config::instance();
+    return connect(cfg.getMySQLHost(), cfg.getMySQLPort(),
+                   cfg.getMySQLUser(), cfg.getMySQLPassword(),
+                   cfg.getMySQLDBName());
+}
+
+// 连接数据库（参数化）
+bool MySQL::connect(const string& host, int port,
+                    const string& user, const string& password,
+                    const string& dbname)
+{
+    MYSQL *p = mysql_real_connect(_conn, host.c_str(), user.c_str(),
+                                  password.c_str(), dbname.c_str(),
+                                  port, nullptr, 0);
     if (p != nullptr)
     {
-        mysql_query(_conn, "set names gbk");
+        auto& cfg = Config::instance();
+        string charset = cfg.getMySQLCharset();
+        string setNames = "set names " + charset;
+        mysql_query(_conn, setNames.c_str());
         LOG_INFO << "connect mysql success!";
     }
     else
@@ -37,6 +47,12 @@ bool MySQL::connect()
     }
 
     return p;
+}
+
+// 检查连接是否存活
+bool MySQL::ping()
+{
+    return mysql_ping(_conn) == 0;
 }
 
 // 更新操作

@@ -7,10 +7,12 @@
       "Bash(python -c \"import py_compile; py_compile.compile\\('script/bench_common.py', doraise=True\\); print\\('bench_common.py OK'\\)\")",
       "Bash(python -c \"import py_compile; py_compile.compile\\('script/bench_onechat.py', doraise=True\\); print\\('bench_onechat.py OK'\\)\")",
       "Bash(python -c \"import py_compile; py_compile.compile\\('script/bench_groupchat.py', doraise=True\\); print\\('bench_groupchat.py OK'\\)\")",
-      "Bash(mkdir -p \"f:/Users/sys/Desktop/chat-server - 副本/docs/bench_results\")"
+      "Bash(mkdir -p \"f:/Users/sys/Desktop/chat-server - 副本/docs/bench_results\")",
+      "Bash(mkdir -p \"f:/Users/sys/Desktop/chat-server-dev/.claude/projects/f--Users-sys-Desktop-chat-server-dev/memory/\")"
     ],
     "additionalDirectories": [
-      "f:\\Users\\sys\\Desktop\\chat-server - 副本\\docs"
+      "f:\\Users\\sys\\Desktop\\chat-server - 副本\\docs",
+      "f:\\Users\\sys\\Desktop\\chat-server-dev\\.claude\\projects\\f--Users-sys-Desktop-chat-server-dev"
     ]
   }
 }

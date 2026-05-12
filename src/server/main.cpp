@@ -1,6 +1,7 @@
 #include "chatserver.hpp"
 #include "chatservice.hpp"
 #include "config.hpp"
+#include "connectionpool.h"
 #include <iostream>
 #include <signal.h>
 #include "chat.pb.h"
@@ -21,6 +22,17 @@ int main(int argc, char **argv)
     {
         cerr << "load config file failed!" << endl;
         return -1;
+    }
+
+    // 初始化数据库连接池
+    {
+        auto& cfg = Config::instance();
+        int poolSize = cfg.getThreadNum();  // 一线程一连接
+        ConnectionPool::instance()->init(
+            cfg.getMySQLHost(), cfg.getMySQLPort(),
+            cfg.getMySQLUser(), cfg.getMySQLPassword(),
+            cfg.getMySQLDBName(), poolSize
+        );
     }
 
     signal(SIGINT, resetHandler);

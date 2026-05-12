@@ -112,7 +112,6 @@ def run_all_offline(group_size: int, messages: int) -> dict:
                 "groupid": group_id,
                 "name": owner_name,
                 "msg": f"{RUN_ID}_ao_m{j}",
-                "bench_ts": t0,
                 "time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
             }
             send_json(sock, msg)
@@ -148,8 +147,8 @@ def run_all_offline(group_size: int, messages: int) -> dict:
 # ==================== 场景 B：混合在线扇出 ====================
 
 def _group_receiver(user_id: int, password: str, expected_msgs: int,
-                    latencies: list, errors: list, ready_event: threading.Event):
-    """群消息接收者线程"""
+                    recv_stamps: list, errors: list, ready_event: threading.Event):
+    """群消息接收者线程：保持长连接，收消息并记录接收时间戳"""
     sock = None
     try:
         sock = socket.create_connection((HOST, PORT), timeout=CONNECT_TIMEOUT)
@@ -163,9 +162,7 @@ def _group_receiver(user_id: int, password: str, expected_msgs: int,
                 break
             if msg.get("msgid") != GROUP_CHAT_MSG:
                 continue
-            send_ts = msg.get("bench_ts", 0.0)
-            if send_ts > 0:
-                latencies.append((time.perf_counter() - send_ts) * 1000.0)
+            recv_stamps.append(time.perf_counter())
             received += 1
     except Exception as e:
         errors.append(f"[grp recv u{user_id}] {e}")
@@ -210,7 +207,7 @@ def run_mixed_online(group_size: int, messages: int) -> dict:
     online_pwds = all_member_pwds[:online_count - 1]
 
     # 启动在线接收者
-    recv_latencies = [[] for _ in range(len(online_members))]
+    recv_stamps_list = [[] for _ in range(len(online_members))]
     recv_errors = []
     ready_events = [threading.Event() for _ in range(len(online_members))]
 
@@ -218,7 +215,7 @@ def run_mixed_online(group_size: int, messages: int) -> dict:
     for i, (mid, mpwd) in enumerate(zip(online_members, online_pwds)):
         t = threading.Thread(
             target=_group_receiver,
-            args=(mid, mpwd, messages, recv_latencies[i], recv_errors, ready_events[i]),
+            args=(mid, mpwd, messages, recv_stamps_list[i], recv_errors, ready_events[i]),
             daemon=True,
         )
         t.start()
@@ -229,6 +226,7 @@ def run_mixed_online(group_size: int, messages: int) -> dict:
             print(f"  WARNING: receiver {i} not ready")
 
     # owner 登录发消息
+    send_stamps = []
     sock = None
     try:
         sock = socket.create_connection((HOST, PORT), timeout=CONNECT_TIMEOUT)
@@ -236,13 +234,13 @@ def run_mixed_online(group_size: int, messages: int) -> dict:
 
         send_start = time.perf_counter()
         for j in range(messages):
+            send_stamps.append(time.perf_counter())
             msg = {
                 "msgid": GROUP_CHAT_MSG,
                 "id": owner_id,
                 "groupid": group_id,
                 "name": owner_name,
                 "msg": f"{RUN_ID}_mo_m{j}",
-                "bench_ts": time.perf_counter(),
                 "time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
             }
             send_json(sock, msg)
@@ -252,18 +250,21 @@ def run_mixed_online(group_size: int, messages: int) -> dict:
             sock.close()
 
     # 等待接收者收完
+    grace_timeout = max(5, messages * 0.1)
     for t in recv_threads:
-        t.join(timeout=15)
+        t.join(timeout=grace_timeout)
 
-    # 汇总延迟
+    # 按序号匹配 send/recv 时间戳，计算端到端延迟
     warmup_skip = max(1, int(messages * WARMUP_RATIO))
     all_latencies = []
-    for bucket in recv_latencies:
-        if len(bucket) > warmup_skip:
-            all_latencies.extend(bucket[warmup_skip:])
+    total_recv = 0
+    for recv_stamps in recv_stamps_list:
+        total_recv += len(recv_stamps)
+        n = min(len(send_stamps), len(recv_stamps))
+        for i in range(warmup_skip, n):
+            all_latencies.append((recv_stamps[i] - send_stamps[i]) * 1000.0)
 
     elapsed = send_end - send_start
-    total_received = len(all_latencies)
     expected_online_received = len(online_members) * messages
     # 离线部分
     offline_count = group_size - 1 - len(online_members)
@@ -276,7 +277,7 @@ def run_mixed_online(group_size: int, messages: int) -> dict:
         "offline_recipients": offline_count,
         "total_messages": messages,
         "expected_online_received": expected_online_received,
-        "actual_online_received": total_received,
+        "actual_online_received": total_recv,
         "expected_offline_rows": expected_offline_rows,
         "qps": round(messages / elapsed, 1) if elapsed > 0 else 0.0,
         "elapsed_seconds": round(elapsed, 3),

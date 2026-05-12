@@ -28,23 +28,41 @@ def send_json(sock: socket.socket, obj: dict) -> None:
 
 
 def recv_one_json(sock: socket.socket, timeout: float = RECV_TIMEOUT) -> Optional[dict]:
+    """从 socket 读取一条 \0 分隔的 JSON 消息。
+    使用内部缓冲区处理 TCP 粘包：一次 recv 可能包含多条消息，
+    剩余数据留在缓冲区供下次调用使用。"""
+    if not hasattr(sock, "_bench_buf"):
+        sock._bench_buf = b""
+
     sock.settimeout(timeout)
-    data = b""
+
     while True:
+        # 先检查缓冲区中是否已有完整消息
+        parts = sock._bench_buf.split(b"\0", 1)
+        if len(parts) == 2:
+            sock._bench_buf = parts[1]
+            try:
+                return json.loads(parts[0].decode("utf-8"))
+            except json.JSONDecodeError:
+                continue  # 损坏的数据，丢弃，继续找下一条
+
+        # 需要读取更多数据
         try:
             chunk = sock.recv(4096)
         except socket.timeout:
-            return None if not data else json.loads(data.rstrip(b"\0").decode("utf-8"))
+            return None
         if not chunk:
             break
-        data += chunk
-        try:
-            return json.loads(data.rstrip(b"\0").decode("utf-8"))
-        except json.JSONDecodeError:
-            continue
-    if not data:
+        sock._bench_buf += chunk
+
+    if not sock._bench_buf:
         return None
-    return json.loads(data.rstrip(b"\0").decode("utf-8"))
+    # 连接关闭，尝试解析剩余数据
+    parts = sock._bench_buf.split(b"\0", 1)
+    try:
+        return json.loads(parts[0].decode("utf-8"))
+    except json.JSONDecodeError:
+        return None
 
 
 def register_user(run_id: str, index: int) -> Tuple[int, str, str]:
