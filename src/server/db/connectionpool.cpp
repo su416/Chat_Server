@@ -87,3 +87,19 @@ shared_ptr<MySQL> ConnectionPool::getConnection()
         }
     });
 }
+
+ConnectionPool::~ConnectionPool()
+{
+    shutdown();
+}
+
+void ConnectionPool::shutdown()
+{
+    lock_guard<mutex> lg(_mutex);
+    while (!_pool.empty())
+    {
+        delete _pool.front();
+        _pool.pop();
+    }
+    LOG_INFO << "ConnectionPool: shutdown, released all connections";
+}

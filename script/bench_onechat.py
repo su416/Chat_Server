@@ -113,8 +113,8 @@ def run_online_to_online(concurrency: int, messages_per_pair: int) -> dict:
     # 1. 注册用户
     pairs = []  # [(sid, spwd), (rid, rpwd)]
     for i in range(concurrency):
-        sid, _, spwd = register_user(f"{RUN_ID}_oto", f"s{i}")
-        rid, _, rpwd = register_user(f"{RUN_ID}_oto", f"r{i}")
+        sid, _, spwd = register_user(f"{RUN_ID}_c{concurrency}_oto", f"s{i}")
+        rid, _, rpwd = register_user(f"{RUN_ID}_c{concurrency}_oto", f"r{i}")
         pairs.append(((sid, spwd), (rid, rpwd)))
     print(f"  registered {len(pairs)} pairs")
 
@@ -247,10 +247,10 @@ def run_online_to_offline(concurrency: int, messages_per_sender: int) -> dict:
     print(f"{'='*60}")
 
     # 1. 注册 1 个接收者（永远不会登录）+ concurrency 个发送者
-    rid, _, rpwd = register_user(f"{RUN_ID}_otf", "receiver")
+    rid, _, rpwd = register_user(f"{RUN_ID}_c{concurrency}_otf", "receiver")
     senders = []
     for i in range(concurrency):
-        sid, _, spwd = register_user(f"{RUN_ID}_otf", f"s{i}")
+        sid, _, spwd = register_user(f"{RUN_ID}_c{concurrency}_otf", f"s{i}")
         senders.append((sid, spwd))
     print(f"  registered receiver={rid}, {len(senders)} senders")
 

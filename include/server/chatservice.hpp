@@ -5,6 +5,7 @@
 #include <unordered_map>
 #include <functional>
 #include <mutex>
+#include <shared_mutex>
 
 using namespace std;
 using namespace muduo;
@@ -66,8 +67,8 @@ private:
     unordered_map<int, MsgHandler> _msgHandlerMap;
     // 存储在线用户的通信连接
     unordered_map<int, TcpConnectionPtr> _userConnMap;
-    // 定义互斥锁，保证 _userConnMap 的线程安全
-    mutex _connMutex;
+    // 读写锁：读(在线查找)支持并发，写(登录/登出)互斥
+    shared_mutex _connMutex;
 
     // 数据操作类对象
     UserModel _userModel;

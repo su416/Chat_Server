@@ -79,11 +79,11 @@ def run_all_offline(group_size: int, messages: int) -> dict:
     print(f"{'='*60}")
 
     # 注册成员
-    owner_id, owner_name, owner_pwd = register_user(f"{RUN_ID}_ao", "owner")
+    owner_id, owner_name, owner_pwd = register_user(f"{RUN_ID}_sz{group_size}_ao", "owner")
     member_ids = []
     member_pwds = []
     for i in range(1, group_size):
-        mid, _, mpwd = register_user(f"{RUN_ID}_ao", f"m{i}")
+        mid, _, mpwd = register_user(f"{RUN_ID}_sz{group_size}_ao", f"m{i}")
         member_ids.append(mid)
         member_pwds.append(mpwd)
     print(f"  registered {group_size} users")
@@ -91,7 +91,7 @@ def run_all_offline(group_size: int, messages: int) -> dict:
     # 创建群 + 所有人加入
     group_id = create_and_populate_group(
         owner_id, owner_pwd, member_ids, member_pwds,
-        f"{RUN_ID}_ao_g",
+        f"{RUN_ID}_sz{group_size}_ao_g",
     )
     print(f"  group_id={group_id}, all members joined (all now offline)")
 
@@ -185,18 +185,18 @@ def run_mixed_online(group_size: int, messages: int) -> dict:
     print(f"{'='*60}")
 
     # 注册 owner + member_ids[0..online_count-2] 在线，其余离线
-    owner_id, owner_name, owner_pwd = register_user(f"{RUN_ID}_mo", "owner")
+    owner_id, owner_name, owner_pwd = register_user(f"{RUN_ID}_sz{group_size}_mo", "owner")
     all_member_ids = []
     all_member_pwds = []
     for i in range(1, group_size):
-        mid, _, mpwd = register_user(f"{RUN_ID}_mo", f"m{i}")
+        mid, _, mpwd = register_user(f"{RUN_ID}_sz{group_size}_mo", f"m{i}")
         all_member_ids.append(mid)
         all_member_pwds.append(mpwd)
 
     # 创建群 + 所有成员加入
     group_id = create_and_populate_group(
         owner_id, owner_pwd, all_member_ids, all_member_pwds,
-        f"{RUN_ID}_mo_g",
+        f"{RUN_ID}_sz{group_size}_mo_g",
     )
     print(f"  group_id={group_id}, all members joined (now offline)")
 

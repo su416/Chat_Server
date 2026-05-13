@@ -1,0 +1,167 @@
+{
+  "run_id": "bench1c_1778599998",
+  "timestamp": "2026-05-12 23:33:18",
+  "server": "127.0.0.1:6000",
+  "online_to_online": [
+    {
+      "concurrency": 10,
+      "scenario": "online_to_online",
+      "total_messages": 500,
+      "success_messages": 500,
+      "failed_messages": 0,
+      "qps": 10315.5,
+      "elapsed_seconds": 0.048,
+      "latency": {
+        "count": 450,
+        "avg_ms": 195.27,
+        "p50_ms": 216.9,
+        "p95_ms": 295.41,
+        "p99_ms": 303.31,
+        "p999_ms": 304.67,
+        "min_ms": 29.29,
+        "max_ms": 304.67
+      },
+      "receiver_errors": 0,
+      "sender_errors": 0
+    },
+    {
+      "concurrency": 50,
+      "scenario": "online_to_online",
+      "total_messages": 2500,
+      "success_messages": 2500,
+      "failed_messages": 0,
+      "qps": 15021.5,
+      "elapsed_seconds": 0.166,
+      "latency": {
+        "count": 2250,
+        "avg_ms": 1035.2,
+        "p50_ms": 1143.59,
+        "p95_ms": 1245.1,
+        "p99_ms": 1270.54,
+        "p999_ms": 1272.14,
+        "min_ms": 78.0,
+        "max_ms": 1273.09
+      },
+      "receiver_errors": 0,
+      "sender_errors": 0
+    },
+    {
+      "concurrency": 100,
+      "scenario": "online_to_online",
+      "total_messages": 5000,
+      "success_messages": 5000,
+      "failed_messages": 0,
+      "qps": 14938.9,
+      "elapsed_seconds": 0.335,
+      "latency": {
+        "count": 4500,
+        "avg_ms": 1611.02,
+        "p50_ms": 1529.42,
+        "p95_ms": 2535.63,
+        "p99_ms": 2592.67,
+        "p999_ms": 2632.17,
+        "min_ms": 36.87,
+        "max_ms": 2634.8
+      },
+      "receiver_errors": 0,
+      "sender_errors": 0
+    },
+    {
+      "concurrency": 200,
+      "scenario": "online_to_online",
+      "error": "register failed for bench1c_1778599998_c200_oto_us0: None"
+    },
+    {
+      "concurrency": 500,
+      "scenario": "online_to_online",
+      "error": "register failed for bench1c_1778599998_c500_oto_us0: None"
+    }
+  ],
+  "online_to_offline": [
+    {
+      "concurrency": 10,
+      "scenario": "online_to_offline",
+      "total_messages": 1000,
+      "success_messages": 900,
+      "failed_messages": 100,
+      "qps": 13809.6,
+      "elapsed_seconds": 0.072,
+      "latency": {
+        "count": 900,
+        "avg_ms": 0.47,
+        "p50_ms": 0.04,
+        "p95_ms": 2.31,
+        "p99_ms": 6.84,
+        "p999_ms": 18.04,
+        "min_ms": 0.01,
+        "max_ms": 18.04
+      },
+      "errors": 0
+    },
+    {
+      "concurrency": 50,
+      "scenario": "online_to_offline",
+      "total_messages": 5000,
+      "success_messages": 4500,
+      "failed_messages": 500,
+      "qps": 14684.5,
+      "elapsed_seconds": 0.34,
+      "latency": {
+        "count": 4500,
+        "avg_ms": 2.74,
+        "p50_ms": 0.07,
+        "p95_ms": 14.19,
+        "p99_ms": 24.08,
+        "p999_ms": 39.01,
+        "min_ms": 0.01,
+        "max_ms": 41.54
+      },
+      "errors": 0
+    },
+    {
+      "concurrency": 100,
+      "scenario": "online_to_offline",
+      "total_messages": 10000,
+      "success_messages": 9000,
+      "failed_messages": 1000,
+      "qps": 15375.5,
+      "elapsed_seconds": 0.65,
+      "latency": {
+        "count": 9000,
+        "avg_ms": 4.84,
+        "p50_ms": 0.06,
+        "p95_ms": 24.54,
+        "p99_ms": 46.37,
+        "p999_ms": 79.07,
+        "min_ms": 0.01,
+        "max_ms": 125.64
+      },
+      "errors": 0
+    },
+    {
+      "concurrency": 200,
+      "scenario": "online_to_offline",
+      "total_messages": 20000,
+      "success_messages": 18000,
+      "failed_messages": 2000,
+      "qps": 14076.8,
+      "elapsed_seconds": 1.421,
+      "latency": {
+        "count": 18000,
+        "avg_ms": 8.9,
+        "p50_ms": 0.06,
+        "p95_ms": 45.84,
+        "p99_ms": 81.86,
+        "p999_ms": 131.3,
+        "min_ms": 0.01,
+        "max_ms": 165.68
+      },
+      "errors": 0
+    },
+    {
+      "concurrency": 500,
+      "scenario": "online_to_offline",
+      "error": "register failed for bench1c_1778599998_c500_otf_ureceiver: None"
+    }
+  ]
+}

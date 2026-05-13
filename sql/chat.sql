@@ -5,7 +5,7 @@ use chat;
 create table if not exists user (
     id int primary key auto_increment,
     name varchar(50) not null unique,
-    password varchar(50) not null,
+    password varchar(64) not null,
     state varchar(20) not null default 'offline'
 ) engine=InnoDB default charset=utf8mb4;
 

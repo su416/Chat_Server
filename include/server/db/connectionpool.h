@@ -29,8 +29,12 @@ public:
     // 返回 shared_ptr<MySQL>，引用计数归零时自动归还到池
     shared_ptr<MySQL> getConnection();
 
+    // 销毁池中所有连接，进程退出前调用
+    void shutdown();
+
 private:
     ConnectionPool() = default;
+    ~ConnectionPool();
     ConnectionPool(const ConnectionPool&) = delete;
     ConnectionPool& operator=(const ConnectionPool&) = delete;
 

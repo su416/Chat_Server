@@ -3,6 +3,7 @@ aux_source_directory(. SERVER_SRC)
 aux_source_directory(./db DB_SRC)
 aux_source_directory(./model MODEL_SRC)
 aux_source_directory(./redis REDIS_SRC)
+aux_source_directory(./utils UTILS_SRC)
 
 # protobuf 生成文件
 set(PROTO_SRC
@@ -15,6 +16,7 @@ add_executable(ChatServer
     ${DB_SRC}
     ${MODEL_SRC}
     ${REDIS_SRC}
+    ${UTILS_SRC}
     ${PROTO_SRC}
 )
 
@@ -25,5 +27,7 @@ target_link_libraries(ChatServer
     mysqlclient
     hiredis
     pthread
+    ssl
+    crypto
     ${Protobuf_LIBRARIES}
 )

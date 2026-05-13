@@ -1,16 +1,18 @@
 #include "usermodel.hpp"
 #include "db.h"
 #include "connectionpool.h"
+#include "password_utils.hpp"
 #include <iostream>
 using namespace std;
 
 // User表的增加方法
 bool UserModel::insert(User &user)
 {
-    // 1.组装sql语句
+    // 1.组装sql语句（密码做 SHA-256 哈希后存储）
     char sql[1024] = {0};
+    string hashedPwd = PasswordUtils::hashPassword(user.getPwd());
     sprintf(sql, "insert into user(name, password, state) values('%s', '%s', '%s')",
-            user.getName().c_str(), user.getPwd().c_str(), user.getState().c_str());
+            user.getName().c_str(), hashedPwd.c_str(), user.getState().c_str());
 
     auto mysql = ConnectionPool::instance()->getConnection();
     if (mysql->update(sql))
@@ -73,4 +75,34 @@ void UserModel::resetState()
 
     auto mysql = ConnectionPool::instance()->getConnection();
     mysql->update(sql);
+}
+
+// 批量查询用户状态（群聊扇出优化：N 次单独查询 → 1 次批量查询）
+unordered_map<int, string> UserModel::queryStates(const vector<int>& ids)
+{
+    unordered_map<int, string> result;
+    if (ids.empty())
+        return result;
+
+    // 构造 WHERE id IN (1,2,3,...)
+    string sql = "select id, state from user where id in (";
+    for (size_t i = 0; i < ids.size(); ++i)
+    {
+        if (i > 0) sql += ",";
+        sql += to_string(ids[i]);
+    }
+    sql += ")";
+
+    auto mysql = ConnectionPool::instance()->getConnection();
+    MYSQL_RES *res = mysql->query(sql);
+    if (res != nullptr)
+    {
+        MYSQL_ROW row;
+        while ((row = mysql_fetch_row(res)) != nullptr)
+        {
+            result[atoi(row[0])] = row[1] ? row[1] : "";
+        }
+        mysql_free_result(res);
+    }
+    return result;
 }

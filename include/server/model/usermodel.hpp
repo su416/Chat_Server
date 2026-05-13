@@ -2,6 +2,10 @@
 #define USERMODEL_H
 
 #include "user.hpp"
+#include <vector>
+#include <unordered_map>
+#include <string>
+using namespace std;
 
 // User表的数据操作类
 class UserModel {
@@ -17,6 +21,9 @@ public:
 
     // 重置用户的状态信息
     void resetState();
+
+    // 批量查询用户状态（群聊扇出优化：N+1 → 1 次查询）
+    unordered_map<int, string> queryStates(const vector<int>& ids);
 };
 
 #endif

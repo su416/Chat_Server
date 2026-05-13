@@ -21,34 +21,7 @@ Redis::~Redis()
     }
 }
 
-/*bool Redis::connect()
-{
-    // 负责publish发布消息的上下文连接
-    _publish_context = redisConnect("127.0.0.1", 6379);
-    if (nullptr == _publish_context)
-    {
-        cerr << "connect redis failed!" << endl;
-        return false;
-    }
 
-    // 负责subscribe订阅消息的上下文连接
-    _subcribe_context = redisConnect("127.0.0.1", 6379);
-    if (nullptr == _subcribe_context)
-    {
-        cerr << "connect redis failed!" << endl;
-        return false;
-    }
-
-    // 在单独的线程中，监听通道上的事件，有消息给业务层进行上报
-    thread t([&]() {
-        observer_channel_message();
-    });
-    t.detach();
-
-    cout << "connect redis-server success!" << endl;
-
-    return true;
-}*/
 
 bool Redis::connect()
 {
@@ -148,8 +121,13 @@ void Redis::observer_channel_message()
     redisReply *reply = nullptr;
     while (REDIS_OK == redisGetReply(this->_subcribe_context, (void **)&reply))
     {
-        // 订阅收到的消息是一个带三元素的数组
-        if (reply != nullptr && reply->element[2] != nullptr && reply->element[2]->str != nullptr)
+        // 订阅收到的消息是一个带三元素的数组：
+        // element[0]="message", element[1]=通道号, element[2]=消息体
+        if (reply != nullptr
+            && reply->type == REDIS_REPLY_ARRAY
+            && reply->elements >= 3
+            && reply->element[1] != nullptr && reply->element[1]->str != nullptr
+            && reply->element[2] != nullptr && reply->element[2]->str != nullptr)
         {
             // 给业务层上报通道上发生的消息
             _notify_message_handler(atoi(reply->element[1]->str) , reply->element[2]->str);

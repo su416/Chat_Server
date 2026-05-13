@@ -1,6 +1,7 @@
 #include "chatservice.hpp"
 #include "public.hpp"
 #include "jsoncodec.hpp"
+#include "password_utils.hpp"
 #include <muduo/base/Logging.h>
 #include <vector>
 #include "proto_utils.hpp"
@@ -88,7 +89,7 @@ void ChatService::login(const TcpConnectionPtr &conn, json &js, Timestamp time)
     string pwd = js["password"];
 
     User user = _userModel.query(id);
-    if (user.getId() == id && user.getPwd() == pwd)
+    if (user.getId() == id && PasswordUtils::verifyPassword(pwd, user.getPwd()))
     {
         if (user.getState() == "online")
         {
@@ -103,7 +104,7 @@ void ChatService::login(const TcpConnectionPtr &conn, json &js, Timestamp time)
         {
             // 登录成功，记录用户连接信息
             {
-                lock_guard<mutex> lock(_connMutex);
+                lock_guard<shared_mutex> lock(_connMutex);
                 _userConnMap.insert({id, conn});
             }
 
@@ -223,7 +224,7 @@ void ChatService::loginout(const TcpConnectionPtr &conn, json &js, Timestamp tim
     int userid = js["id"].get<int>();
 
     {
-        lock_guard<mutex> lock(_connMutex);
+        lock_guard<shared_mutex> lock(_connMutex);
         auto it = _userConnMap.find(userid);
         if (it != _userConnMap.end())
         {
@@ -244,7 +245,7 @@ void ChatService::clientCloseException(const TcpConnectionPtr &conn)
 {
     User user;
     {
-        lock_guard<mutex> lock(_connMutex);
+        lock_guard<shared_mutex> lock(_connMutex);
         for (auto it = _userConnMap.begin(); it != _userConnMap.end(); ++it)
         {
             if (it->second == conn)
@@ -279,7 +280,7 @@ void ChatService::oneChat(const TcpConnectionPtr &conn, json &js, Timestamp time
     _chatHistoryModel.insertOneChat(fromid, toid, msg);
 
     {
-        lock_guard<mutex> lock(_connMutex);
+        shared_lock<shared_mutex> lock(_connMutex);
         auto it = _userConnMap.find(toid);
         if (it != _userConnMap.end())
         {
@@ -457,26 +458,45 @@ void ChatService::groupChat(const TcpConnectionPtr &conn, json &js, Timestamp ti
 
     vector<int> useridVec = _groupModel.queryGroupUsers(userid, groupid);
 
-    lock_guard<mutex> lock(_connMutex);
-    for (int id : useridVec)
+    // 读锁：快速扫描 map，收集在线连接和离线 ID
+    vector<TcpConnectionPtr> onlineConns;
+    vector<int> offlineIds;
     {
-        auto it = _userConnMap.find(id);
-        if (it != _userConnMap.end())
+        shared_lock<shared_mutex> lock(_connMutex);
+        for (int id : useridVec)
         {
-            // 转发群消息
-            sendTcpJson(it->second, js);
+            auto it = _userConnMap.find(id);
+            if (it != _userConnMap.end())
+            {
+                onlineConns.push_back(it->second);
+            }
+            else
+            {
+                offlineIds.push_back(id);
+            }
         }
-        else
+    }
+    // 锁已释放，下面的 DB 操作不阻塞其他线程读取 _userConnMap
+
+    // 转发给在线成员
+    for (auto &c : onlineConns)
+    {
+        sendTcpJson(c, js);
+    }
+
+    // 处理离线成员：一次批量查询所有状态（消除 N+1）
+    if (!offlineIds.empty())
+    {
+        auto stateMap = _userModel.queryStates(offlineIds);
+        for (int id : offlineIds)
         {
-            // 查询 id 是否在线
-            User user = _userModel.query(id);
-            if (user.getState() == "online")
+            string state = stateMap[id];
+            if (state == "online")
             {
                 _redis.publish(id, js.dump());
             }
             else
             {
-                // 存储离线群消息
                 _offlineMsgModel.insert(id, js.dump());
             }
         }
@@ -486,7 +506,7 @@ void ChatService::groupChat(const TcpConnectionPtr &conn, json &js, Timestamp ti
 // 从redis消息队列中获取订阅的消息
 void ChatService::handleRedisSubscribeMessage(int userid, string msg)
 {
-    lock_guard<mutex> lock(_connMutex);
+    shared_lock<shared_mutex> lock(_connMutex);
     auto it = _userConnMap.find(userid);
     if (it != _userConnMap.end())
     {

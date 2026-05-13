@@ -1,0 +1,161 @@
+首先Segmentation fault (core dumped) 服务端已经崩溃并退出了进程 经过排查：
+sudo dmesg | grep -i "out of memory\|oom\|killed" | tail -20
+ [ 7.588015] systemd[1]: Listening on systemd-oomd.socket - Userspace Out-Of-Memory (OOM) Killer Socket. [10758.778212] rcu: Unless rcu_preempt kthread gets sufficient CPU time, OOM is now expected behavior. 
+sudo dmesg | grep -i "ChatServer\|segfault\|core" | tail -20 [ 1.128795] core: CPUID marked event: 'branch instructions' unavailable [ 1.128803] core: CPUID marked event: 'branch misses' unavailable [ 1.129521] core: cpu_core PMU driver: [ 1.195819] pinctrl core: initialized pinctrl subsystem [ 1.966162] usbcore: registered new interface driver usbfs [ 1.966162] usbcore: registered new interface driver hub [ 1.966927] usbcore: registered new device driver usb [ 1.966988] pps_core: LinuxPPS API ver. 1 registered [ 1.966989] pps_core: Software ver. 5.3.6 - Copyright 2005-2007 Rodolfo Giometti <giometti@linux.it> [ 1.975154] mctp: management component transport protocol core [ 2.653809] device-mapper: core: CONFIG_IMA_DISABLE_HTABLE is disabled. Duplicate IMA measurements will not be recorded in the IMA log. [ 2.685158] Loaded X.509 cert 'Canonical Ltd. Secure Boot Signing (Ubuntu Core 2019): c1d57b8f6b743f23ee41f4f7ee292f06eecadfb9' [ 3.879430] usbcore: registered new interface driver usbhid [ 3.879434] usbhid: USB HID core driver [ 7.778227] systemd[1]: Mounting snap-core20-2769.mount - Mount unit for core20, revision 2769... [ 7.780702] systemd[1]: Mounting snap-core22-2292.mount - Mount unit for core22, revision 2292... [ 7.783578] systemd[1]: Mounting snap-core22-2411.mount - Mount unit for core22, revision 2411... [ 7.787633] systemd[1]: Mounting snap-core24-1587.mount - Mount unit for core24, revision 1587... [10758.774152] Modules linked in: isofs snd_seq_dummy snd_hrtimer qrtr snd_ens1371 snd_ac97_codec gameport ac97_bus snd_pcm intel_rapl_msr intel_rapl_common snd_seq_midi snd_seq_midi_event intel_uncore_frequency_common snd_rawmidi intel_pmc_core pmt_telemetry pmt_discovery pmt_class intel_pmc_ssram_telemetry intel_vsec snd_seq polyval_clmulni ghash_clmulni_intel aesni_intel snd_seq_device snd_timer vmw_balloon rapl snd i2c_piix4 soundcore i2c_smbus vsock_loopback vmw_vsock_virtio_transport_common vmw_vsock_vmci_transport vsock vmw_vmci binfmt_misc input_leds joydev mac_hid serio_raw sch_fq_codel vmwgfx drm_ttm_helper ttm msr parport_pc ppdev lp parport efi_pstore nfnetlink dmi_sysfs ip_tables [11561.520385] ChatServer0[6093]: segfault at 10 ip 00005c6b13d38bfc sp 00007872ed9eaa70 error 4 in ChatServer[5fbfc,5c6b13ce5000+7a000] likely on CPU 3 (core 0, socket 6) 
+
+error 4 in ChatServer[5fbfc,5c6b13ce5000+7a000] likely on CPU 3 (core 0, socket 6)
+
+journalctl -xe --no-pager | tail -50
+May 12 20:35:01 su CRON[7227]: pam_unix(cron:session): session opened for user root(uid=0) by root(uid=0)
+May 12 20:35:01 su CRON[7228]: (root) CMD (command -v debian-sa1 > /dev/null && debian-sa1 1 1)
+May 12 20:35:01 su CRON[7227]: pam_unix(cron:session): session closed for user root
+May 12 20:40:05 su systemd[1]: Starting sysstat-collect.service - system activity accounting tool...
+░░ Subject: A start job for unit sysstat-collect.service has begun execution
+░░ Defined-By: systemd
+░░ Support: http://www.ubuntu.com/support
+░░ 
+░░ A start job for unit sysstat-collect.service has begun execution.
+░░ 
+░░ The job identifier is 7938.
+May 12 20:40:05 su systemd[1]: sysstat-collect.service: Deactivated successfully.
+░░ Subject: Unit succeeded
+░░ Defined-By: systemd
+░░ Support: http://www.ubuntu.com/support
+░░ 
+░░ The unit sysstat-collect.service has successfully entered the 'dead' state.
+May 12 20:40:05 su systemd[1]: Finished sysstat-collect.service - system activity accounting tool.
+░░ Subject: A start job for unit sysstat-collect.service has finished successfully
+░░ Defined-By: systemd
+░░ Support: http://www.ubuntu.com/support
+░░ 
+░░ A start job for unit sysstat-collect.service has finished successfully.
+░░ 
+░░ The job identifier is 7938.
+May 12 20:41:26 su NetworkManager[1411]: <info>  [1778589686.0150] dhcp4 (ens33): state changed new lease, address=192.168.100.128
+May 12 20:41:26 su dbus-daemon[1253]: [system] Activating via systemd: service name='org.freedesktop.nm_dispatcher' unit='dbus-org.freedesktop.nm-dispatcher.service' requested by ':1.13' (uid=0 pid=1411 comm="/usr/sbin/NetworkManager --no-daemon" label="unconfined")
+May 12 20:41:26 su systemd[1]: Starting NetworkManager-dispatcher.service - Network Manager Script Dispatcher Service...
+░░ Subject: A start job for unit NetworkManager-dispatcher.service has begun execution
+░░ Defined-By: systemd
+░░ Support: http://www.ubuntu.com/support
+░░ 
+░░ A start job for unit NetworkManager-dispatcher.service has begun execution.
+░░ 
+░░ The job identifier is 8017.
+May 12 20:41:26 su dbus-daemon[1253]: [system] Successfully activated service 'org.freedesktop.nm_dispatcher'
+May 12 20:41:26 su systemd[1]: Started NetworkManager-dispatcher.service - Network Manager Script Dispatcher Service.
+░░ Subject: A start job for unit NetworkManager-dispatcher.service has finished successfully
+░░ Defined-By: systemd
+░░ Support: http://www.ubuntu.com/support
+░░ 
+░░ A start job for unit NetworkManager-dispatcher.service has finished successfully.
+░░ 
+░░ The job identifier is 8017.
+May 12 20:41:36 su systemd[1]: NetworkManager-dispatcher.service: Deactivated successfully.
+░░ Subject: Unit succeeded
+░░ Defined-By: systemd
+░░ Support: http://www.ubuntu.com/support
+░░ 
+░░ The unit NetworkManager-dispatcher.service has successfully entered the 'dead' state.
+
+
+ys@su:~/Desktop/chat-server$ tail -100 server_*.log
+20260512 12:48:31.266799Z  7269 INFO  TcpServer::newConnection [ChatServer] - new connection [ChatServer-127.0.0.1:6000#111] from 127.0.0.1:60026 - TcpServer.cc:80
+20260512 12:48:31.266825Z  7269 INFO  TcpServer::removeConnectionInLoop [ChatServer] - connection ChatServer-127.0.0.1:6000#110 - TcpServer.cc:109
+20260512 12:48:31.268372Z  7269 INFO  TcpServer::newConnection [ChatServer] - new connection [ChatServer-127.0.0.1:6000#112] from 127.0.0.1:60032 - TcpServer.cc:80
+20260512 12:48:31.268387Z  7269 INFO  TcpServer::removeConnectionInLoop [ChatServer] - connection ChatServer-127.0.0.1:6000#111 - TcpServer.cc:109
+20260512 12:48:31.269491Z  7269 INFO  TcpServer::removeConnectionInLoop [ChatServer] - connection ChatServer-127.0.0.1:6000#112 - TcpServer.cc:109
+20260512 12:48:31.269582Z  7269 INFO  TcpServer::newConnection [ChatServer] - new connection [ChatServer-127.0.0.1:6000#113] from 127.0.0.1:60046 - TcpServer.cc:80
+20260512 12:48:31.271400Z  7269 INFO  TcpServer::newConnection [ChatServer] - new connection [ChatServer-127.0.0.1:6000#114] from 127.0.0.1:60060 - TcpServer.cc:80
+20260512 12:48:31.271422Z  7269 INFO  TcpServer::removeConnectionInLoop [ChatServer] - connection ChatServer-127.0.0.1:6000#113 - TcpServer.cc:109
+20260512 12:48:31.274292Z  7269 INFO  TcpServer::newConnection [ChatServer] - new connection [ChatServer-127.0.0.1:6000#115] from 127.0.0.1:60066 - TcpServer.cc:80
+20260512 12:48:31.274341Z  7269 INFO  TcpServer::removeConnectionInLoop [ChatServer] - connection ChatServer-127.0.0.1:6000#114 - TcpServer.cc:109
+20260512 12:48:31.276816Z  7269 INFO  TcpServer::newConnection [ChatServer] - new connection [ChatServer-127.0.0.1:6000#116] from 127.0.0.1:60078 - TcpServer.cc:80
+20260512 12:48:31.276862Z  7269 INFO  TcpServer::removeConnectionInLoop [ChatServer] - connection ChatServer-127.0.0.1:6000#115 - TcpServer.cc:109
+20260512 12:48:31.284257Z  7269 INFO  TcpServer::newConnection [ChatServer] - new connection [ChatServer-127.0.0.1:6000#117] from 127.0.0.1:60088 - TcpServer.cc:80
+20260512 12:48:31.285613Z  7269 INFO  TcpServer::removeConnectionInLoop [ChatServer] - connection ChatServer-127.0.0.1:6000#116 - TcpServer.cc:109
+20260512 12:48:31.286232Z  7269 INFO  TcpServer::newConnection [ChatServer] - new connection [ChatServer-127.0.0.1:6000#118] from 127.0.0.1:60090 - TcpServer.cc:80
+20260512 12:48:31.286369Z  7269 INFO  TcpServer::removeConnectionInLoop [ChatServer] - connection ChatServer-127.0.0.1:6000#117 - TcpServer.cc:109
+20260512 12:48:31.287775Z  7269 INFO  TcpServer::removeConnectionInLoop [ChatServer] - connection ChatServer-127.0.0.1:6000#118 - TcpServer.cc:109
+20260512 12:48:31.287873Z  7269 INFO  TcpServer::newConnection [ChatServer] - new connection [ChatServer-127.0.0.1:6000#119] from 127.0.0.1:60098 - TcpServer.cc:80
+20260512 12:48:31.289489Z  7269 INFO  TcpServer::newConnection [ChatServer] - new connection [ChatServer-127.0.0.1:6000#120] from 127.0.0.1:60104 - TcpServer.cc:80
+20260512 12:48:31.289503Z  7269 INFO  TcpServer::removeConnectionInLoop [ChatServer] - connection ChatServer-127.0.0.1:6000#119 - TcpServer.cc:109
+20260512 12:48:31.290607Z  7269 INFO  TcpServer::newConnection [ChatServer] - new connection [ChatServer-127.0.0.1:6000#121] from 127.0.0.1:60112 - TcpServer.cc:80
+20260512 12:48:31.290654Z  7269 INFO  TcpServer::removeConnectionInLoop [ChatServer] - connection ChatServer-127.0.0.1:6000#120 - TcpServer.cc:109
+20260512 12:48:31.292231Z  7269 INFO  TcpServer::newConnection [ChatServer] - new connection [ChatServer-127.0.0.1:6000#122] from 127.0.0.1:60128 - TcpServer.cc:80
+20260512 12:48:31.293059Z  7269 INFO  TcpServer::removeConnectionInLoop [ChatServer] - connection ChatServer-127.0.0.1:6000#121 - TcpServer.cc:109
+20260512 12:48:31.295224Z  7269 INFO  TcpServer::removeConnectionInLoop [ChatServer] - connection ChatServer-127.0.0.1:6000#122 - TcpServer.cc:109
+20260512 12:48:31.295317Z  7269 INFO  TcpServer::newConnection [ChatServer] - new connection [ChatServer-127.0.0.1:6000#123] from 127.0.0.1:60130 - TcpServer.cc:80
+20260512 12:48:31.298504Z  7269 INFO  TcpServer::newConnection [ChatServer] - new connection [ChatServer-127.0.0.1:6000#124] from 127.0.0.1:60144 - TcpServer.cc:80
+20260512 12:48:31.298526Z  7269 INFO  TcpServer::removeConnectionInLoop [ChatServer] - connection ChatServer-127.0.0.1:6000#123 - TcpServer.cc:109
+20260512 12:48:31.300252Z  7269 INFO  TcpServer::newConnection [ChatServer] - new connection [ChatServer-127.0.0.1:6000#125] from 127.0.0.1:60156 - TcpServer.cc:80
+20260512 12:48:31.300343Z  7269 INFO  TcpServer::removeConnectionInLoop [ChatServer] - connection ChatServer-127.0.0.1:6000#124 - TcpServer.cc:109
+20260512 12:48:31.302941Z  7269 INFO  TcpServer::removeConnectionInLoop [ChatServer] - connection ChatServer-127.0.0.1:6000#125 - TcpServer.cc:109
+20260512 12:48:31.303003Z  7269 INFO  TcpServer::newConnection [ChatServer] - new connection [ChatServer-127.0.0.1:6000#126] from 127.0.0.1:60168 - TcpServer.cc:80
+20260512 12:48:31.304947Z  7269 INFO  TcpServer::newConnection [ChatServer] - new connection [ChatServer-127.0.0.1:6000#127] from 127.0.0.1:60184 - TcpServer.cc:80
+20260512 12:48:31.304976Z  7269 INFO  TcpServer::removeConnectionInLoop [ChatServer] - connection ChatServer-127.0.0.1:6000#126 - TcpServer.cc:109
+20260512 12:48:31.306808Z  7269 INFO  TcpServer::newConnection [ChatServer] - new connection [ChatServer-127.0.0.1:6000#128] from 127.0.0.1:60186 - TcpServer.cc:80
+20260512 12:48:31.306829Z  7269 INFO  TcpServer::removeConnectionInLoop [ChatServer] - connection ChatServer-127.0.0.1:6000#127 - TcpServer.cc:109
+20260512 12:48:31.309082Z  7269 INFO  TcpServer::newConnection [ChatServer] - new connection [ChatServer-127.0.0.1:6000#129] from 127.0.0.1:60202 - TcpServer.cc:80
+20260512 12:48:31.309268Z  7269 INFO  TcpServer::removeConnectionInLoop [ChatServer] - connection ChatServer-127.0.0.1:6000#128 - TcpServer.cc:109
+20260512 12:48:31.311042Z  7269 INFO  TcpServer::newConnection [ChatServer] - new connection [ChatServer-127.0.0.1:6000#130] from 127.0.0.1:60212 - TcpServer.cc:80
+20260512 12:48:31.311118Z  7269 INFO  TcpServer::removeConnectionInLoop [ChatServer] - connection ChatServer-127.0.0.1:6000#129 - TcpServer.cc:109
+20260512 12:48:31.312771Z  7269 INFO  TcpServer::removeConnectionInLoop [ChatServer] - connection ChatServer-127.0.0.1:6000#130 - TcpServer.cc:109
+20260512 12:48:31.312865Z  7269 INFO  TcpServer::newConnection [ChatServer] - new connection [ChatServer-127.0.0.1:6000#131] from 127.0.0.1:60224 - TcpServer.cc:80
+20260512 12:48:31.314670Z  7269 INFO  TcpServer::newConnection [ChatServer] - new connection [ChatServer-127.0.0.1:6000#132] from 127.0.0.1:60226 - TcpServer.cc:80
+20260512 12:48:31.314687Z  7269 INFO  TcpServer::removeConnectionInLoop [ChatServer] - connection ChatServer-127.0.0.1:6000#131 - TcpServer.cc:109
+20260512 12:48:31.315893Z  7269 INFO  TcpServer::newConnection [ChatServer] - new connection [ChatServer-127.0.0.1:6000#133] from 127.0.0.1:60232 - TcpServer.cc:80
+20260512 12:48:31.315909Z  7269 INFO  TcpServer::removeConnectionInLoop [ChatServer] - connection ChatServer-127.0.0.1:6000#132 - TcpServer.cc:109
+20260512 12:48:31.317437Z  7269 INFO  TcpServer::newConnection [ChatServer] - new connection [ChatServer-127.0.0.1:6000#134] from 127.0.0.1:60244 - TcpServer.cc:80
+20260512 12:48:31.317455Z  7269 INFO  TcpServer::removeConnectionInLoop [ChatServer] - connection ChatServer-127.0.0.1:6000#133 - TcpServer.cc:109
+20260512 12:48:31.319972Z  7269 INFO  TcpServer::removeConnectionInLoop [ChatServer] - connection ChatServer-127.0.0.1:6000#134 - TcpServer.cc:109
+20260512 12:48:31.320039Z  7269 INFO  TcpServer::newConnection [ChatServer] - new connection [ChatServer-127.0.0.1:6000#135] from 127.0.0.1:60252 - TcpServer.cc:80
+20260512 12:48:31.321707Z  7269 INFO  TcpServer::newConnection [ChatServer] - new connection [ChatServer-127.0.0.1:6000#136] from 127.0.0.1:60264 - TcpServer.cc:80
+20260512 12:48:31.321721Z  7269 INFO  TcpServer::removeConnectionInLoop [ChatServer] - connection ChatServer-127.0.0.1:6000#135 - TcpServer.cc:109
+20260512 12:48:31.323748Z  7269 INFO  TcpServer::newConnection [ChatServer] - new connection [ChatServer-127.0.0.1:6000#137] from 127.0.0.1:60274 - TcpServer.cc:80
+20260512 12:48:31.323851Z  7269 INFO  TcpServer::removeConnectionInLoop [ChatServer] - connection ChatServer-127.0.0.1:6000#136 - TcpServer.cc:109
+20260512 12:48:31.325553Z  7269 INFO  TcpServer::removeConnectionInLoop [ChatServer] - connection ChatServer-127.0.0.1:6000#137 - TcpServer.cc:109
+20260512 12:48:31.325566Z  7269 INFO  TcpServer::newConnection [ChatServer] - new connection [ChatServer-127.0.0.1:6000#138] from 127.0.0.1:60276 - TcpServer.cc:80
+20260512 12:48:31.337715Z  7269 INFO  TcpServer::removeConnectionInLoop [ChatServer] - connection ChatServer-127.0.0.1:6000#138 - TcpServer.cc:109
+20260512 12:48:31.337838Z  7269 INFO  TcpServer::newConnection [ChatServer] - new connection [ChatServer-127.0.0.1:6000#139] from 127.0.0.1:60284 - TcpServer.cc:80
+20260512 12:48:31.339725Z  7269 INFO  TcpServer::newConnection [ChatServer] - new connection [ChatServer-127.0.0.1:6000#140] from 127.0.0.1:60296 - TcpServer.cc:80
+20260512 12:48:31.339796Z  7269 INFO  TcpServer::removeConnectionInLoop [ChatServer] - connection ChatServer-127.0.0.1:6000#139 - TcpServer.cc:109
+20260512 12:48:31.340921Z  7269 INFO  TcpServer::newConnection [ChatServer] - new connection [ChatServer-127.0.0.1:6000#141] from 127.0.0.1:60312 - TcpServer.cc:80
+20260512 12:48:31.340937Z  7269 INFO  TcpServer::removeConnectionInLoop [ChatServer] - connection ChatServer-127.0.0.1:6000#140 - TcpServer.cc:109
+20260512 12:48:31.342411Z  7269 INFO  TcpServer::newConnection [ChatServer] - new connection [ChatServer-127.0.0.1:6000#142] from 127.0.0.1:60318 - TcpServer.cc:80
+20260512 12:48:31.342436Z  7269 INFO  TcpServer::removeConnectionInLoop [ChatServer] - connection ChatServer-127.0.0.1:6000#141 - TcpServer.cc:109
+20260512 12:48:31.343834Z  7269 INFO  TcpServer::removeConnectionInLoop [ChatServer] - connection ChatServer-127.0.0.1:6000#142 - TcpServer.cc:109
+20260512 12:48:31.343948Z  7269 INFO  TcpServer::newConnection [ChatServer] - new connection [ChatServer-127.0.0.1:6000#143] from 127.0.0.1:60334 - TcpServer.cc:80
+20260512 12:48:31.345639Z  7269 INFO  TcpServer::newConnection [ChatServer] - new connection [ChatServer-127.0.0.1:6000#144] from 127.0.0.1:60350 - TcpServer.cc:80
+20260512 12:48:31.345713Z  7269 INFO  TcpServer::removeConnectionInLoop [ChatServer] - connection ChatServer-127.0.0.1:6000#143 - TcpServer.cc:109
+20260512 12:48:31.347169Z  7269 INFO  TcpServer::newConnection [ChatServer] - new connection [ChatServer-127.0.0.1:6000#145] from 127.0.0.1:60352 - TcpServer.cc:80
+20260512 12:48:31.347405Z  7269 INFO  TcpServer::removeConnectionInLoop [ChatServer] - connection ChatServer-127.0.0.1:6000#144 - TcpServer.cc:109
+20260512 12:48:31.348638Z  7269 INFO  TcpServer::removeConnectionInLoop [ChatServer] - connection ChatServer-127.0.0.1:6000#145 - TcpServer.cc:109
+20260512 12:48:31.348658Z  7269 INFO  TcpServer::newConnection [ChatServer] - new connection [ChatServer-127.0.0.1:6000#146] from 127.0.0.1:60366 - TcpServer.cc:80
+20260512 12:48:31.350082Z  7269 INFO  TcpServer::removeConnectionInLoop [ChatServer] - connection ChatServer-127.0.0.1:6000#146 - TcpServer.cc:109
+20260512 12:48:31.350204Z  7269 INFO  TcpServer::newConnection [ChatServer] - new connection [ChatServer-127.0.0.1:6000#147] from 127.0.0.1:60378 - TcpServer.cc:80
+20260512 12:48:31.352096Z  7269 INFO  TcpServer::newConnection [ChatServer] - new connection [ChatServer-127.0.0.1:6000#148] from 127.0.0.1:60390 - TcpServer.cc:80
+20260512 12:48:31.352124Z  7269 INFO  TcpServer::removeConnectionInLoop [ChatServer] - connection ChatServer-127.0.0.1:6000#147 - TcpServer.cc:109
+20260512 12:48:31.353648Z  7269 INFO  TcpServer::newConnection [ChatServer] - new connection [ChatServer-127.0.0.1:6000#149] from 127.0.0.1:60396 - TcpServer.cc:80
+20260512 12:48:31.353675Z  7269 INFO  TcpServer::removeConnectionInLoop [ChatServer] - connection ChatServer-127.0.0.1:6000#148 - TcpServer.cc:109
+20260512 12:48:31.355398Z  7269 INFO  TcpServer::newConnection [ChatServer] - new connection [ChatServer-127.0.0.1:6000#150] from 127.0.0.1:60398 - TcpServer.cc:80
+20260512 12:48:31.355855Z  7269 INFO  TcpServer::removeConnectionInLoop [ChatServer] - connection ChatServer-127.0.0.1:6000#149 - TcpServer.cc:109
+20260512 12:48:31.357631Z  7269 INFO  TcpServer::newConnection [ChatServer] - new connection [ChatServer-127.0.0.1:6000#151] from 127.0.0.1:60404 - TcpServer.cc:80
+20260512 12:48:31.357647Z  7269 INFO  TcpServer::removeConnectionInLoop [ChatServer] - connection ChatServer-127.0.0.1:6000#150 - TcpServer.cc:109
+20260512 12:48:31.360048Z  7269 INFO  TcpServer::newConnection [ChatServer] - new connection [ChatServer-127.0.0.1:6000#152] from 127.0.0.1:60408 - TcpServer.cc:80
+20260512 12:48:31.360066Z  7269 INFO  TcpServer::removeConnectionInLoop [ChatServer] - connection ChatServer-127.0.0.1:6000#151 - TcpServer.cc:109
+20260512 12:48:31.367783Z  7269 INFO  TcpServer::newConnection [ChatServer] - new connection [ChatServer-127.0.0.1:6000#153] from 127.0.0.1:60414 - TcpServer.cc:80
+20260512 12:48:31.367829Z  7269 INFO  TcpServer::removeConnectionInLoop [ChatServer] - connection ChatServer-127.0.0.1:6000#152 - TcpServer.cc:109
+20260512 12:48:31.369863Z  7269 INFO  TcpServer::newConnection [ChatServer] - new connection [ChatServer-127.0.0.1:6000#154] from 127.0.0.1:60428 - TcpServer.cc:80
+20260512 12:48:31.369889Z  7269 INFO  TcpServer::removeConnectionInLoop [ChatServer] - connection ChatServer-127.0.0.1:6000#153 - TcpServer.cc:109
+20260512 12:48:31.372030Z  7269 INFO  TcpServer::newConnection [ChatServer] - new connection [ChatServer-127.0.0.1:6000#155] from 127.0.0.1:60432 - TcpServer.cc:80
+20260512 12:48:31.372082Z  7269 INFO  TcpServer::removeConnectionInLoop [ChatServer] - connection ChatServer-127.0.0.1:6000#154 - TcpServer.cc:109
+20260512 12:48:31.374169Z  7269 INFO  TcpServer::removeConnectionInLoop [ChatServer] - connection ChatServer-127.0.0.1:6000#155 - TcpServer.cc:109
+20260512 12:48:31.374201Z  7269 INFO  TcpServer::newConnection [ChatServer] - new connection [ChatServer-127.0.0.1:6000#156] from 127.0.0.1:60442 - TcpServer.cc:80
+20260512 12:48:31.375997Z  7269 INFO  TcpServer::newConnection [ChatServer] - new connection [ChatServer-127.0.0.1:6000#157] from 127.0.0.1:60458 - TcpServer.cc:80
+20260512 12:48:31.376017Z  7269 INFO  TcpServer::removeConnectionInLoop [ChatServer] - connection ChatServer-127.0.0.1:6000#156 - TcpServer.cc:109
+20260512 12:48:31.378604Z  7269 INFO  TcpServer::newConnection [ChatServer] - new connection [ChatServer-127.0.0.1:6000#158] from 127.0.0.1:60460 - TcpServer.cc:80
+20260512 12:48:31.378618Z  7269 INFO  TcpServer::removeConnectionInLoop [ChatServer] - connection ChatServer-127.0.0.1:6000#157 - TcpServer.cc:109
+20260512 12:48:31.380163Z  7269 INFO  TcpServer::removeConnectionInLoop [ChatServer] - connection ChatServer-127.0.0.1:6000#158 - TcpServer.cc:109
+20260512 12:48:31.380277Z  7269 INFO  TcpServer::newConnection [ChatServer] - new connection [ChatServer-127.0.0.1:6000#159] from 127.0.0.1:60466 - TcpServer.cc:80
+20260512 12:48:31.381731Z  7269 INFO  TcpServer::removeConnectionInLoop [ChatServer] - connection ChatServer-127.0.0.1:6000#159 - TcpServer.cc:109
+20260512 12:48:31.381762Z  7269 INFO  TcpServer::newConnection [ChatServer] - newys
