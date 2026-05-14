@@ -36,8 +36,17 @@ int main(int argc, char **argv)
         );
     }
 
-    // 初始化令牌桶限流器：每用户每秒 20 条，突发容量 30
-    RateLimiter::instance()->init(30, 20.0);
+    // 初始化令牌桶限流器（参数由配置文件控制）
+    {
+        auto& cfg = Config::instance();
+        if (cfg.isRateLimitEnabled())
+        {
+            RateLimiter::instance()->init(
+                cfg.getRateLimitCapacity(),
+                cfg.getRateLimitPerSec()
+            );
+        }
+    }
 
     signal(SIGINT, resetHandler);
 

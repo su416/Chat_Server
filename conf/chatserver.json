@@ -25,5 +25,10 @@
   },
   "business": {
     "max_history_count": 50
+  },
+  "rate_limit": {
+    "enabled": true,
+    "capacity": 1000,
+    "rate_per_sec": 10000.0
   }
 }

@@ -51,6 +51,15 @@ bool Config::load(const string& filename)
 
         // business
         _configMap["business.max_history_count"] = to_string(js["business"]["max_history_count"].get<int>());
+
+        // rate_limit（可选，不存在时使用默认值）
+        if (js.contains("rate_limit"))
+        {
+            auto& rl = js["rate_limit"];
+            _configMap["rate_limit.enabled"] = rl.value("enabled", true) ? "true" : "false";
+            _configMap["rate_limit.capacity"] = to_string(rl.value("capacity", 1000));
+            _configMap["rate_limit.rate_per_sec"] = to_string(rl.value("rate_per_sec", 10000.0));
+        }
     }
     catch (const exception& e)
     {
@@ -139,4 +148,25 @@ bool Config::useProtobufHistory() const
         return false;
     }
     return it->second == "true";
+}
+// rate_limit
+bool Config::isRateLimitEnabled() const
+{
+    auto it = _configMap.find("rate_limit.enabled");
+    if (it == _configMap.end()) return true;
+    return it->second == "true";
+}
+
+int Config::getRateLimitCapacity() const
+{
+    auto it = _configMap.find("rate_limit.capacity");
+    if (it == _configMap.end()) return 1000;
+    return stoi(it->second);
+}
+
+double Config::getRateLimitPerSec() const
+{
+    auto it = _configMap.find("rate_limit.rate_per_sec");
+    if (it == _configMap.end()) return 10000.0;
+    return stod(it->second);
 }

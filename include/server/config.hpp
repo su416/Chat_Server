@@ -39,6 +39,11 @@ public:
      // protocol
     bool useProtobufHistory() const;
 
+    // rate_limit
+    bool isRateLimitEnabled() const;
+    int getRateLimitCapacity() const;
+    double getRateLimitPerSec() const;
+
 private:
     Config() = default;
     Config(const Config&) = delete;
