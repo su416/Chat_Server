@@ -1,0 +1,59 @@
+version: "3.8"
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: chatserver-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: "123456"
+      MYSQL_DATABASE: chat
+    ports:
+      - "3307:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./sql:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p123456"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - chatnet
+
+  redis:
+    image: redis:7-alpine
+    container_name: chatserver-redis
+    restart: unless-stopped
+    ports:
+      - "6380:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - chatnet
+
+  chatserver:
+    build: .
+    container_name: chatserver-app
+    restart: unless-stopped
+    ports:
+      - "6000:6000"
+    volumes:
+      - ./conf/chatserver.docker.json:/app/conf/chatserver.json:ro
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - chatnet
+
+volumes:
+  mysql_data:
+
+networks:
+  chatnet:
+    driver: bridge

@@ -1,6 +1,6 @@
 {
-  "run_id": "benchgc_1778741034",
-  "timestamp": "2026-05-14 14:43:54",
+  "run_id": "benchgc_1778743544",
+  "timestamp": "2026-05-14 15:25:44",
   "server": "127.0.0.1:6000",
   "group_all_offline": [
     {
@@ -10,19 +10,19 @@
       "total_messages": 200,
       "expected_offline_rows": 800,
       "expected_history_rows": 200,
-      "qps": 70764.1,
-      "elapsed_seconds": 0.003,
+      "qps": 83593.6,
+      "elapsed_seconds": 0.002,
       "latency": {
         "count": 180,
         "avg_ms": 0.01,
         "p50_ms": 0.01,
-        "p95_ms": 0.03,
-        "p99_ms": 0.07,
-        "p999_ms": 0.07,
+        "p95_ms": 0.01,
+        "p99_ms": 0.03,
+        "p999_ms": 0.05,
         "min_ms": 0.01,
-        "max_ms": 0.07
+        "max_ms": 0.05
       },
-      "group_id": 1
+      "group_id": 9
     },
     {
       "group_size": 20,
@@ -31,19 +31,19 @@
       "total_messages": 200,
       "expected_offline_rows": 3800,
       "expected_history_rows": 200,
-      "qps": 57450.2,
-      "elapsed_seconds": 0.003,
+      "qps": 45172.7,
+      "elapsed_seconds": 0.004,
       "latency": {
         "count": 180,
         "avg_ms": 0.02,
-        "p50_ms": 0.01,
+        "p50_ms": 0.02,
         "p95_ms": 0.03,
-        "p99_ms": 0.13,
-        "p999_ms": 0.26,
+        "p99_ms": 0.2,
+        "p999_ms": 0.3,
         "min_ms": 0.01,
-        "max_ms": 0.26
+        "max_ms": 0.3
       },
-      "group_id": 3
+      "group_id": 11
     },
     {
       "group_size": 50,
@@ -52,19 +52,19 @@
       "total_messages": 200,
       "expected_offline_rows": 9800,
       "expected_history_rows": 200,
-      "qps": 63952.4,
+      "qps": 72607.4,
       "elapsed_seconds": 0.003,
       "latency": {
         "count": 180,
         "avg_ms": 0.01,
         "p50_ms": 0.01,
-        "p95_ms": 0.03,
-        "p99_ms": 0.1,
-        "p999_ms": 0.13,
+        "p95_ms": 0.02,
+        "p99_ms": 0.05,
+        "p999_ms": 0.18,
         "min_ms": 0.01,
-        "max_ms": 0.13
+        "max_ms": 0.18
       },
-      "group_id": 4
+      "group_id": 12
     }
   ],
   "group_mixed_online": [
@@ -77,29 +77,29 @@
       "expected_online_received": 200,
       "actual_online_received": 200,
       "expected_offline_rows": 600,
-      "qps": 50575.3,
-      "elapsed_seconds": 0.004,
+      "qps": 66098.1,
+      "elapsed_seconds": 0.003,
       "latency": {
         "count": 180,
-        "avg_ms": 2513.69,
-        "p50_ms": 2601.78,
-        "p95_ms": 4010.46,
-        "p99_ms": 4133.34,
-        "p999_ms": 4149.97,
-        "min_ms": 629.46,
-        "max_ms": 4149.97
+        "avg_ms": 2055.01,
+        "p50_ms": 1877.1,
+        "p95_ms": 3846.38,
+        "p99_ms": 3966.5,
+        "p999_ms": 3981.25,
+        "min_ms": 359.34,
+        "max_ms": 3981.25
       },
-      "group_id": 2
+      "group_id": 10
     },
     {
       "group_size": 20,
       "scenario": "group_mixed_online",
-      "error": "register failed for benchgc_1778741034_sz20_mo_um3: None"
+      "error": "register failed for benchgc_1778743544_sz20_mo_um3: None"
     },
     {
       "group_size": 50,
       "scenario": "group_mixed_online",
-      "error": "register failed for benchgc_1778741034_sz50_mo_um3: None"
+      "error": "register failed for benchgc_1778743544_sz50_mo_um3: None"
     }
   ]
 }
