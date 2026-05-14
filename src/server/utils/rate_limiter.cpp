@@ -18,6 +18,10 @@ void RateLimiter::init(int capacity, double rate)
 
 bool RateLimiter::allow(int userId)
 {
+    // 未初始化 = 禁用，零开销跳过
+    if (!_initialized)
+        return true;
+
     auto now = chrono::duration_cast<chrono::milliseconds>(
         chrono::steady_clock::now().time_since_epoch()).count();
 
