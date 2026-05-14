@@ -29,6 +29,12 @@ public:
     // 返回 shared_ptr<MySQL>，引用计数归零时自动归还到池
     shared_ptr<MySQL> getConnection();
 
+    // 取连接，timeoutMs 毫秒内无可用连接返回 nullptr（降级用）
+    shared_ptr<MySQL> getConnection(int timeoutMs);
+
+    // 当前空闲连接数
+    int idleCount();
+
     // 销毁池中所有连接，进程退出前调用
     void shutdown();
 
@@ -37,6 +43,9 @@ private:
     ~ConnectionPool();
     ConnectionPool(const ConnectionPool&) = delete;
     ConnectionPool& operator=(const ConnectionPool&) = delete;
+
+    // 用自定义 deleter 包装连接：析构时归还到池
+    shared_ptr<MySQL> wrapConnection(MySQL* conn);
 
     queue<MySQL*> _pool;
     mutex _mutex;

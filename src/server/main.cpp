@@ -2,6 +2,7 @@
 #include "chatservice.hpp"
 #include "config.hpp"
 #include "connectionpool.h"
+#include "rate_limiter.hpp"
 #include <iostream>
 #include <signal.h>
 #include "chat.pb.h"
@@ -34,6 +35,9 @@ int main(int argc, char **argv)
             cfg.getMySQLDBName(), poolSize
         );
     }
+
+    // 初始化令牌桶限流器：每用户每秒 20 条，突发容量 30
+    RateLimiter::instance()->init(30, 20.0);
 
     signal(SIGINT, resetHandler);
 

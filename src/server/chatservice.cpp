@@ -2,6 +2,7 @@
 #include "public.hpp"
 #include "jsoncodec.hpp"
 #include "password_utils.hpp"
+#include "rate_limiter.hpp"
 #include <muduo/base/Logging.h>
 #include <vector>
 #include "proto_utils.hpp"
@@ -276,6 +277,17 @@ void ChatService::oneChat(const TcpConnectionPtr &conn, json &js, Timestamp time
     int toid = js["toid"].get<int>();
     string msg = js["msg"];
 
+    // 限流检查
+    if (!RateLimiter::instance()->allow(fromid))
+    {
+        json response;
+        response["msgid"] = ONE_CHAT_MSG_ACK;
+        response["errno"] = 3;
+        response["errmsg"] = "rate limit exceeded, slow down";
+        sendTcpJson(conn, response);
+        return;
+    }
+
     // 先落库单聊历史消息
     _chatHistoryModel.insertOneChat(fromid, toid, msg);
 
@@ -294,11 +306,15 @@ void ChatService::oneChat(const TcpConnectionPtr &conn, json &js, Timestamp time
     User user = _userModel.query(toid);
     if (user.getState() == "online")
     {
-        _redis.publish(toid, js.dump());
-        return;
+        if (_redis.publish(toid, js.dump()))
+        {
+            return;
+        }
+        // Redis 不可用，降级为本地离线存储
+        LOG_ERROR << "redis publish failed, fallback to offline storage";
     }
 
-    // toid 不在线，存储离线消息
+    // toid 不在线（或 Redis 不可用），存储离线消息
     _offlineMsgModel.insert(toid, js.dump());
 }
 
@@ -453,6 +469,17 @@ void ChatService::groupChat(const TcpConnectionPtr &conn, json &js, Timestamp ti
     int groupid = js["groupid"].get<int>();
     string msg = js["msg"];
 
+    // 限流检查
+    if (!RateLimiter::instance()->allow(userid))
+    {
+        json response;
+        response["msgid"] = GROUP_CHAT_MSG_ACK;
+        response["errno"] = 3;
+        response["errmsg"] = "rate limit exceeded, slow down";
+        sendTcpJson(conn, response);
+        return;
+    }
+
     // 先落库群聊历史消息
     _chatHistoryModel.insertGroupChat(userid, groupid, msg);
 
@@ -493,7 +520,11 @@ void ChatService::groupChat(const TcpConnectionPtr &conn, json &js, Timestamp ti
             string state = stateMap[id];
             if (state == "online")
             {
-                _redis.publish(id, js.dump());
+                if (!_redis.publish(id, js.dump()))
+                {
+                    // Redis 不可用，降级为本地离线存储
+                    _offlineMsgModel.insert(id, js.dump());
+                }
             }
             else
             {

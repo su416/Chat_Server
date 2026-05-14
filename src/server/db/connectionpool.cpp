@@ -1,5 +1,6 @@
 #include "connectionpool.h"
 #include <muduo/base/Logging.h>
+#include <chrono>
 
 ConnectionPool* ConnectionPool::instance()
 {
@@ -43,21 +44,11 @@ void ConnectionPool::init(const string& host, int port,
              << " connections";
 }
 
-shared_ptr<MySQL> ConnectionPool::getConnection()
+shared_ptr<MySQL> ConnectionPool::wrapConnection(MySQL* conn)
 {
-    unique_lock<mutex> lock(_mutex);
-
-    // 池空则阻塞，等待其他线程归还连接
-    _cv.wait(lock, [this] { return !_pool.empty(); });
-
-    MySQL* conn = _pool.front();
-    _pool.pop();
-
-    // 自定义 deleter：shared_ptr 析构时归还连接而非 delete
     return shared_ptr<MySQL>(conn, [this](MySQL* c) {
         if (c->ping())
         {
-            // 连接正常，放回池中
             {
                 lock_guard<mutex> lg(_mutex);
                 _pool.push(c);
@@ -66,7 +57,6 @@ shared_ptr<MySQL> ConnectionPool::getConnection()
         }
         else
         {
-            // 连接已断开（MySQL wait_timeout 等），重建一条
             LOG_INFO << "ConnectionPool: stale connection, recreating...";
             MySQL* newConn = new MySQL();
             if (newConn->connect(_host, _port, _user, _password, _dbname))
@@ -82,10 +72,46 @@ shared_ptr<MySQL> ConnectionPool::getConnection()
                 LOG_ERROR << "ConnectionPool: failed to recreate connection";
                 delete newConn;
             }
-            // 旧连接已断，直接 delete
             delete c;
         }
     });
+}
+
+shared_ptr<MySQL> ConnectionPool::getConnection()
+{
+    unique_lock<mutex> lock(_mutex);
+
+    // 池空则阻塞，等待其他线程归还连接
+    _cv.wait(lock, [this] { return !_pool.empty(); });
+
+    MySQL* conn = _pool.front();
+    _pool.pop();
+
+    return wrapConnection(conn);
+}
+
+shared_ptr<MySQL> ConnectionPool::getConnection(int timeoutMs)
+{
+    unique_lock<mutex> lock(_mutex);
+
+    if (!_cv.wait_for(lock, chrono::milliseconds(timeoutMs),
+                      [this] { return !_pool.empty(); }))
+    {
+        LOG_ERROR << "ConnectionPool: getConnection timeout after "
+                  << timeoutMs << "ms";
+        return nullptr;
+    }
+
+    MySQL* conn = _pool.front();
+    _pool.pop();
+
+    return wrapConnection(conn);
+}
+
+int ConnectionPool::idleCount()
+{
+    lock_guard<mutex> lg(_mutex);
+    return static_cast<int>(_pool.size());
 }
 
 ConnectionPool::~ConnectionPool()
