@@ -24,7 +24,9 @@ enum EnMsgType
     QUERY_GROUP_CHAT_HISTORY_MSG_ACK, // 查询群聊历史响应
     ADD_FRIEND_MSG_ACK, //添加好友成功
 CREATE_GROUP_MSG_ACK,  //创建群成功
-ADD_GROUP_MSG_ACK  //加群成功
+ADD_GROUP_MSG_ACK,      //加群成功
+ONE_CHAT_MSG_ACK,       // 单聊限流/错误响应
+GROUP_CHAT_MSG_ACK      // 群聊限流/错误响应
 };
 
 #endif
