@@ -2,6 +2,8 @@
 #include "json.hpp"
 #include "chatservice.hpp"
 #include "server/jsoncodec.hpp"
+#include "protocodec.hpp"
+#include "chat.pb.h"
 
 #include <muduo/base/Logging.h>
 #include <iostream>
@@ -11,6 +13,93 @@
 using namespace std;
 using namespace placeholders;
 using json = nlohmann::json;
+
+namespace
+{
+
+// Protobuf → JSON 桥接：根据 msgid 解析 payload 并构造等效 JSON
+json protoToJson(int msgid, const string& payload)
+{
+    json js;
+    js["msgid"] = msgid;
+
+    switch (msgid)
+    {
+    case 1: // LOGIN_MSG
+    {
+        chat::LoginRequest req;
+        if (req.ParseFromString(payload))
+        {
+            js["id"] = req.id();
+            js["password"] = req.password();
+        }
+        break;
+    }
+    case 4: // REG_MSG
+    {
+        chat::RegisterRequest req;
+        if (req.ParseFromString(payload))
+        {
+            js["name"] = req.name();
+            js["password"] = req.password();
+        }
+        break;
+    }
+    case 6: // ONE_CHAT_MSG
+    {
+        chat::OneChatRequest req;
+        if (req.ParseFromString(payload))
+        {
+            js["id"] = req.id();
+            js["toid"] = req.toid();
+            js["name"] = req.name();
+            js["msg"] = req.msg();
+            js["time"] = req.time();
+        }
+        break;
+    }
+    default:
+        break;
+    }
+    return js;
+}
+
+// JSON 响应 → Protobuf 包装（作为响应 Envelope 的 payload）
+string jsonToProtoResponse(int msgid, int errcode, const string& errmsg,
+                           const json& response)
+{
+    chat::Envelope env;
+    env.set_msgid(msgid);
+    env.set_errcode(errcode);
+    env.set_errmsg(errmsg);
+    // 响应原样返回 JSON 字符串作为 payload
+    env.set_payload(response.dump());
+    return env.SerializeAsString();
+}
+
+} // namespace
+
+// 协议感知响应编码
+std::string ChatServer::encodeResponse(const TcpConnectionPtr& conn,
+                                       const std::string& jsonBody)
+{
+    try
+    {
+        int proto = conn->getContext<int>();
+        if (proto == ConnProtocol::PROTO_PROTOBUF)
+        {
+            // Protobuf 连接 → 用 Envelope 包装 + ProtoCodec 分帧
+            chat::Envelope env;
+            env.set_errcode(0);
+            env.set_payload(jsonBody);
+            return ProtoCodec::encode(env.SerializeAsString());
+        }
+    }
+    catch (...) { /* 默认走 JSON */ }
+
+    // JSON 连接（或未设置 context）→ JsonCodec 分帧
+    return JsonCodec::encode(jsonBody);
+}
 
 // 初始化聊天服务器对象
 ChatServer::ChatServer(EventLoop *loop,
@@ -31,7 +120,12 @@ void ChatServer::start()
 
 void ChatServer::onConnection(const TcpConnectionPtr &conn)
 {
-    if (!conn->connected())
+    if (conn->connected())
+    {
+        // 新连接默认按 JSON 协议处理
+        conn->setContext(ConnProtocol::PROTO_JSON);
+    }
+    else
     {
         ChatService::instance()->clientCloseException(conn);
         conn->shutdown();
@@ -44,24 +138,62 @@ void ChatServer::onMessage(const TcpConnectionPtr &conn,
 {
     std::string frame;
 
-    while (JsonCodec::tryExtractFrame(buffer, frame))
+    while (buffer->readableBytes() > 0)
     {
-        if (frame.empty())
-        {
-            continue;
-        }
+        // 协议检测：JSON 以 '{' 开头，Protobuf 首字节是二进制长度前缀
+        char firstByte = buffer->peek()[0];
 
-        try
+        if (firstByte == '{')
         {
-            json js = json::parse(frame);
+            // ──── JSON 协议路径 ────
+            conn->setContext(ConnProtocol::PROTO_JSON);
 
-            auto msgHandler = ChatService::instance()->getHandler(js["msgid"].get<int>());
-            msgHandler(conn, js, time);
+            if (!JsonCodec::tryExtractFrame(buffer, frame))
+                break;
+
+            if (frame.empty())
+                continue;
+
+            try
+            {
+                json js = json::parse(frame);
+                auto msgHandler = ChatService::instance()->getHandler(
+                    js["msgid"].get<int>());
+                msgHandler(conn, js, time);
+            }
+            catch (const std::exception &e)
+            {
+                LOG_ERROR << "invalid json frame: " << e.what()
+                          << " frame=" << frame;
+            }
         }
-        catch (const std::exception &e)
+        else
         {
-            LOG_ERROR << "invalid json frame: " << e.what()
-                      << " frame=" << frame;
+            // ──── Protobuf 协议路径 ────
+            conn->setContext(ConnProtocol::PROTO_PROTOBUF);
+
+            if (!ProtoCodec::tryExtractFrame(buffer, frame))
+                break;
+
+            try
+            {
+                chat::Envelope env;
+                if (!env.ParseFromString(frame))
+                {
+                    LOG_ERROR << "protobuf: failed to parse envelope";
+                    continue;
+                }
+
+                int msgid = env.msgid();
+                json js = protoToJson(msgid, env.payload());
+
+                auto msgHandler = ChatService::instance()->getHandler(msgid);
+                msgHandler(conn, js, time);
+            }
+            catch (const std::exception &e)
+            {
+                LOG_ERROR << "protobuf frame error: " << e.what();
+            }
         }
     }
 }

@@ -1,4 +1,5 @@
 #include "chatservice.hpp"
+#include "chatserver.hpp"
 #include "public.hpp"
 #include "jsoncodec.hpp"
 #include "password_utils.hpp"
@@ -15,11 +16,12 @@ namespace
 {
 void sendTcpJson(const TcpConnectionPtr &conn, const json &js)
 {
-    conn->send(JsonCodec::encode(js.dump()));
+    conn->send(ChatServer::encodeResponse(conn, js.dump()));
 }
 
 void sendTcpRaw(const TcpConnectionPtr &conn, const std::string &payload)
 {
+    // Redis 转发的跨服消息始终用 JSON 编码（内部协议不暴露给客户端）
     conn->send(JsonCodec::encode(payload));
 }
 }

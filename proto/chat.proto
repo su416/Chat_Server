@@ -2,6 +2,14 @@ syntax = "proto3";
 
 package chat;
 
+// 协议包装：所有请求/响应均以此为外层容器
+message Envelope {
+  int32 msgid = 1;      // 消息类型（与 JSON 协议的 msgid 共用枚举值）
+  bytes  payload = 2;   // 序列化后的具体请求/响应
+  int32 errcode = 3;    // 响应时使用（0=成功）
+  string errmsg = 4;    // 错误信息
+}
+
 // 登录请求
 message LoginRequest {
   int32 id = 1;

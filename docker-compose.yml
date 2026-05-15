@@ -1,8 +1,6 @@
-version: "3.8"
-
 services:
   mysql:
-    image: mysql:8.0
+    image: registry.cn-hangzhou.aliyuncs.com/docker-hub/mysql:8.0
     container_name: chatserver-mysql
     restart: unless-stopped
     environment:
