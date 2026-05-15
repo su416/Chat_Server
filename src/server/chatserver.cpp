@@ -5,6 +5,7 @@
 #include "protocodec.hpp"
 #include "chat.pb.h"
 
+#include <boost/any.hpp>
 #include <muduo/base/Logging.h>
 #include <iostream>
 #include <functional>
@@ -83,19 +84,16 @@ string jsonToProtoResponse(int msgid, int errcode, const string& errmsg,
 std::string ChatServer::encodeResponse(const TcpConnectionPtr& conn,
                                        const std::string& jsonBody)
 {
-    try
+    const auto& ctx = conn->getContext();
+    const ConnProtocol* proto = boost::any_cast<ConnProtocol>(&ctx);
+    if (proto && *proto == ConnProtocol::PROTO_PROTOBUF)
     {
-        int proto = conn->getContext<int>();
-        if (proto == ConnProtocol::PROTO_PROTOBUF)
-        {
-            // Protobuf 连接 → 用 Envelope 包装 + ProtoCodec 分帧
-            chat::Envelope env;
-            env.set_errcode(0);
-            env.set_payload(jsonBody);
-            return ProtoCodec::encode(env.SerializeAsString());
-        }
+        // Protobuf 连接 → 用 Envelope 包装 + ProtoCodec 分帧
+        chat::Envelope env;
+        env.set_errcode(0);
+        env.set_payload(jsonBody);
+        return ProtoCodec::encode(env.SerializeAsString());
     }
-    catch (...) { /* 默认走 JSON */ }
 
     // JSON 连接（或未设置 context）→ JsonCodec 分帧
     return JsonCodec::encode(jsonBody);
