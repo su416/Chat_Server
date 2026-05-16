@@ -1,5 +1,6 @@
 #include "redis.hpp"
 #include "config.hpp"
+#include <muduo/base/Logging.h>
 #include <iostream>
 using namespace std;
 
