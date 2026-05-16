@@ -32,7 +32,7 @@ bool Redis::connect()
     _publish_context = redisConnect(host.c_str(), port);
     if (nullptr == _publish_context)
     {
-        cerr << "connect redis failed! host=" << host << " port=" << port << endl;
+        LOG_ERROR << "connect redis failed! host=" << host << " port=" << port;
         return false;
     }
 
@@ -40,7 +40,7 @@ bool Redis::connect()
     _subcribe_context = redisConnect(host.c_str(), port);
     if (nullptr == _subcribe_context)
     {
-        cerr << "connect redis failed! host=" << host << " port=" << port << endl;
+        LOG_ERROR << "connect redis failed! host=" << host << " port=" << port;
         return false;
     }
 
@@ -50,7 +50,7 @@ bool Redis::connect()
     });
     t.detach();
 
-    cout << "connect redis-server success! host=" << host << " port=" << port << endl;
+    LOG_INFO << "connect redis-server success! host=" << host << " port=" << port;
 
     return true;
 }
@@ -66,14 +66,14 @@ bool Redis::publish(int channel, string message)
 {
     if (!isConnected())
     {
-        cerr << "redis publish skipped: not connected" << endl;
+        LOG_ERROR << "redis publish skipped: not connected";
         return false;
     }
 
     redisReply *reply = (redisReply *)redisCommand(_publish_context, "PUBLISH %d %s", channel, message.c_str());
     if (nullptr == reply)
     {
-        cerr << "publish command failed!" << endl;
+        LOG_ERROR << "publish command failed!";
         return false;
     }
     freeReplyObject(reply);
@@ -85,13 +85,13 @@ bool Redis::subscribe(int channel)
 {
     if (_subcribe_context == nullptr)
     {
-        cerr << "redis subscribe skipped: not connected" << endl;
+        LOG_ERROR << "redis subscribe skipped: not connected";
         return false;
     }
 
     if (REDIS_ERR == redisAppendCommand(this->_subcribe_context, "SUBSCRIBE %d", channel))
     {
-        cerr << "subscribe command failed!" << endl;
+        LOG_ERROR << "subscribe command failed!";
         return false;
     }
     int done = 0;
@@ -99,7 +99,7 @@ bool Redis::subscribe(int channel)
     {
         if (REDIS_ERR == redisBufferWrite(this->_subcribe_context, &done))
         {
-            cerr << "subscribe command failed!" << endl;
+            LOG_ERROR << "subscribe command failed!";
             return false;
         }
     }
@@ -116,7 +116,7 @@ bool Redis::unsubscribe(int channel)
 
     if (REDIS_ERR == redisAppendCommand(this->_subcribe_context, "UNSUBSCRIBE %d", channel))
     {
-        cerr << "unsubscribe command failed!" << endl;
+        LOG_ERROR << "unsubscribe command failed!";
         return false;
     }
     int done = 0;
@@ -124,7 +124,7 @@ bool Redis::unsubscribe(int channel)
     {
         if (REDIS_ERR == redisBufferWrite(this->_subcribe_context, &done))
         {
-            cerr << "unsubscribe command failed!" << endl;
+            LOG_ERROR << "unsubscribe command failed!";
             return false;
         }
     }
@@ -152,7 +152,7 @@ void Redis::observer_channel_message()
         freeReplyObject(reply);
     }
 
-    cerr << ">>>>>>>>>>>>> observer_channel_message quit <<<<<<<<<<<<<" << endl;
+    LOG_ERROR << ">>>>>>>>>>>>> observer_channel_message quit <<<<<<<<<<<<<";
 }
 
 void Redis::init_notify_handler(function<void(int,string)> fn)
