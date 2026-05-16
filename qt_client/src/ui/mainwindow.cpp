@@ -1,12 +1,15 @@
 #include "ui/mainwindow.h"
-#include <QListWidgetItem>
+#include "model/friendlistmodel.h"
+#include "model/grouplistmodel.h"
+
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QJsonParseError>
 #include <QLabel>
-#include <QListWidget>
+#include <QListView>
 #include <QPushButton>
 #include <QVBoxLayout>
 #include <QWidget>
@@ -15,8 +18,10 @@ MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent),
       m_userInfoLabel(nullptr),
       m_statusLabel(nullptr),
-      m_friendListWidget(nullptr),
-      m_groupListWidget(nullptr),
+      m_friendListView(nullptr),
+      m_groupListView(nullptr),
+      m_friendModel(nullptr),
+      m_groupModel(nullptr),
       m_addFriendButton(nullptr),
       m_createGroupButton(nullptr),
       m_joinGroupButton(nullptr),
@@ -36,23 +41,35 @@ void MainWindow::initUi()
     m_userInfoLabel = new QLabel("Current User: not logged in", this);
     m_statusLabel = new QLabel("Login success. Main window initialized.", this);
 
-    m_friendListWidget = new QListWidget(this);
-    m_groupListWidget = new QListWidget(this);
+    // ---- Model + View 替代原来的 QListWidget ----
+
+    m_friendModel = new FriendListModel(this);
+    m_friendListView = new QListView(this);
+    m_friendListView->setModel(m_friendModel);
+    m_friendListView->setEditTriggers(QAbstractItemView::NoEditTriggers);
+
+    m_groupModel = new GroupListModel(this);
+    m_groupListView = new QListView(this);
+    m_groupListView->setModel(m_groupModel);
+    m_groupListView->setEditTriggers(QAbstractItemView::NoEditTriggers);
+
+    // ---- 按钮 ----
 
     m_addFriendButton = new QPushButton("Add Friend", this);
     m_createGroupButton = new QPushButton("Create Group", this);
     m_joinGroupButton = new QPushButton("Join Group", this);
     m_logoutButton = new QPushButton("Logout", this);
 
-    auto *friendGroup = new QGroupBox("Friends", this);
-    auto *groupGroup = new QGroupBox("Groups", this);
+    // ---- 布局 ----
 
+    auto *friendGroup = new QGroupBox("Friends", this);
     auto *friendLayout = new QVBoxLayout();
-    friendLayout->addWidget(m_friendListWidget);
+    friendLayout->addWidget(m_friendListView);
     friendGroup->setLayout(friendLayout);
 
+    auto *groupGroup = new QGroupBox("Groups", this);
     auto *groupLayout = new QVBoxLayout();
-    groupLayout->addWidget(m_groupListWidget);
+    groupLayout->addWidget(m_groupListView);
     groupGroup->setLayout(groupLayout);
 
     auto *listLayout = new QHBoxLayout();
@@ -72,125 +89,42 @@ void MainWindow::initUi()
     mainLayout->addLayout(buttonLayout);
     mainLayout->addWidget(m_statusLabel);
 
-      connect(m_addFriendButton, &QPushButton::clicked, this, [this]() {
-        emit addFriendRequested();
-    });
+    // ---- 信号连接 ----
 
-       connect(m_createGroupButton, &QPushButton::clicked, this, [this]() {
-        emit createGroupRequested();
-    });
+    connect(m_addFriendButton, &QPushButton::clicked, this,
+            [this]() { emit addFriendRequested(); });
 
-        connect(m_joinGroupButton, &QPushButton::clicked, this, [this]() {
-        emit joinGroupRequested();
-    }); 
+    connect(m_createGroupButton, &QPushButton::clicked, this,
+            [this]() { emit createGroupRequested(); });
 
-   connect(m_logoutButton, &QPushButton::clicked, this, [this]() {
-    emit logoutRequested();
-});
+    connect(m_joinGroupButton, &QPushButton::clicked, this,
+            [this]() { emit joinGroupRequested(); });
 
-    connect(m_friendListWidget, &QListWidget::itemDoubleClicked, this,
-            [this](QListWidgetItem *item) {
-        if (!item)
-        {
-            return;
-        }
+    connect(m_logoutButton, &QPushButton::clicked, this,
+            [this]() { emit logoutRequested(); });
 
-        int friendId = item->data(Qt::UserRole).toInt();
-        QString friendName = item->data(Qt::UserRole + 1).toString();
-
+    // 好友列表双击 → 打开单聊
+    connect(m_friendListView, &QListView::doubleClicked, this,
+            [this](const QModelIndex &index) {
+        if (!index.isValid()) return;
+        int friendId = m_friendModel->friendIdAt(index.row());
+        QString friendName = m_friendModel->friendNameAt(index.row());
         if (friendId > 0)
-        {
             emit friendChatRequested(friendId, friendName);
-        }
     });
 
-        connect(m_groupListWidget, &QListWidget::itemDoubleClicked, this,
-            [this](QListWidgetItem *item) {
-        if (!item)
-        {
-            return;
-        }
-
-        int groupId = item->data(Qt::UserRole).toInt();
-        QString groupName = item->data(Qt::UserRole + 1).toString();
-
+    // 群列表双击 → 打开群聊
+    connect(m_groupListView, &QListView::doubleClicked, this,
+            [this](const QModelIndex &index) {
+        if (!index.isValid()) return;
+        int groupId = m_groupModel->groupIdAt(index.row());
+        QString groupName = m_groupModel->groupNameAt(index.row());
         if (groupId > 0)
-        {
             emit groupChatRequested(groupId, groupName);
-        }
     });
 }
 
-QString MainWindow::parseFriendItem(const QJsonValue &value) const
-{
-    QJsonObject obj;
-
-    if (value.isString())
-    {
-        QJsonParseError err;
-        QJsonDocument doc = QJsonDocument::fromJson(value.toString().toUtf8(), &err);
-        if (err.error == QJsonParseError::NoError && doc.isObject())
-        {
-            obj = doc.object();
-        }
-    }
-    else if (value.isObject())
-    {
-        obj = value.toObject();
-    }
-
-    if (obj.isEmpty())
-    {
-        return value.toString();
-    }
-
-    int id = obj.value("id").toInt();
-    QString name = obj.value("name").toString();
-    QString state = obj.value("state").toString();
-
-    if (state.isEmpty())
-    {
-        return QString("%1 %2").arg(id).arg(name);
-    }
-
-    return QString("%1 %2 %3").arg(id).arg(name).arg(state);
-}
-
-QString MainWindow::parseGroupItem(const QJsonValue &value) const
-{
-    QJsonObject obj;
-
-    if (value.isString())
-    {
-        QJsonParseError err;
-        QJsonDocument doc = QJsonDocument::fromJson(value.toString().toUtf8(), &err);
-        if (err.error == QJsonParseError::NoError && doc.isObject())
-        {
-            obj = doc.object();
-        }
-    }
-    else if (value.isObject())
-    {
-        obj = value.toObject();
-    }
-
-    if (obj.isEmpty())
-    {
-        return value.toString();
-    }
-
-    int id = obj.contains("id") ? obj.value("id").toInt()
-                                : obj.value("groupid").toInt();
-    QString groupName = obj.value("groupname").toString();
-    QString groupDesc = obj.value("groupdesc").toString();
-
-    if (groupDesc.isEmpty())
-    {
-        return QString("%1 %2").arg(id).arg(groupName);
-    }
-
-    return QString("%1 %2 - %3").arg(id).arg(groupName).arg(groupDesc);
-}
+// ---- 从登录响应批量加载好友和群列表 ----
 
 void MainWindow::loadFromLoginResponse(const QJsonObject &response)
 {
@@ -200,129 +134,52 @@ void MainWindow::loadFromLoginResponse(const QJsonObject &response)
     m_userInfoLabel->setText(QString("Current User: id=%1, name=%2").arg(id).arg(name));
     m_statusLabel->setText("Login success. Friend list and group list loaded.");
 
-    m_friendListWidget->clear();
-    m_groupListWidget->clear();
+    m_friendModel->clear();
+    m_groupModel->clear();
 
+    // 解析好友列表
     if (response.contains("friends") && response.value("friends").isArray())
     {
         QJsonArray arr = response.value("friends").toArray();
         for (const auto &item : arr)
         {
-            QJsonObject obj;
-
-            if (item.isString())
-            {
-                QJsonParseError err;
-                QJsonDocument doc = QJsonDocument::fromJson(item.toString().toUtf8(), &err);
-                if (err.error == QJsonParseError::NoError && doc.isObject())
-                {
-                    obj = doc.object();
-                }
-            }
-            else if (item.isObject())
-            {
-                obj = item.toObject();
-            }
-
-            QString displayText = parseFriendItem(item);
-            auto *listItem = new QListWidgetItem(displayText, m_friendListWidget);
-
-            int id = obj.value("id").toInt();
-            QString name = obj.value("name").toString();
-
-            listItem->setData(Qt::UserRole, id);
-            listItem->setData(Qt::UserRole + 1, name);
+            QJsonObject obj = item.toObject();
+            int fid = obj.value("id").toInt();
+            QString fname = obj.value("name").toString();
+            QString fstate = obj.value("state").toString();
+            m_friendModel->addFriend(fid, fname, fstate);
         }
     }
-       if (response.contains("groups") && response.value("groups").isArray())
+
+    // 解析群列表
+    if (response.contains("groups") && response.value("groups").isArray())
     {
         QJsonArray arr = response.value("groups").toArray();
         for (const auto &item : arr)
         {
-            QJsonObject obj;
-
-            if (item.isString())
-            {
-                QJsonParseError err;
-                QJsonDocument doc = QJsonDocument::fromJson(item.toString().toUtf8(), &err);
-                if (err.error == QJsonParseError::NoError && doc.isObject())
-                {
-                    obj = doc.object();
-                }
-            }
-            else if (item.isObject())
-            {
-                obj = item.toObject();
-            }
-
-            QString displayText = parseGroupItem(item);
-            auto *listItem = new QListWidgetItem(displayText, m_groupListWidget);
-
-            int id = obj.contains("id") ? obj.value("id").toInt()
-                                        : obj.value("groupid").toInt();
-            QString name = obj.value("groupname").toString();
-
-            listItem->setData(Qt::UserRole, id);
-            listItem->setData(Qt::UserRole + 1, name);
+            QJsonObject obj = item.toObject();
+            int gid = obj.contains("id") ? obj.value("id").toInt()
+                                         : obj.value("groupid").toInt();
+            QString gname = obj.value("groupname").toString();
+            QString gdesc = obj.value("groupdesc").toString();
+            m_groupModel->addGroup(gid, gname, gdesc);
         }
     }
 }
+
 void MainWindow::setStatusMessage(const QString &text)
 {
     m_statusLabel->setText(text);
 }
 
-bool MainWindow::hasFriendItem(int friendId) const
+void MainWindow::addFriendItem(int friendId, const QString &friendName,
+                                const QString &state)
 {
-    for (int i = 0; i < m_friendListWidget->count(); ++i)
-    {
-        QListWidgetItem *item = m_friendListWidget->item(i);
-        if (item && item->data(Qt::UserRole).toInt() == friendId)
-        {
-            return true;
-        }
-    }
-    return false;
+    m_friendModel->addFriend(friendId, friendName, state);
 }
 
-bool MainWindow::hasGroupItem(int groupId) const
+void MainWindow::addGroupItem(int groupId, const QString &groupName,
+                               const QString &groupDesc)
 {
-    for (int i = 0; i < m_groupListWidget->count(); ++i)
-    {
-        QListWidgetItem *item = m_groupListWidget->item(i);
-        if (item && item->data(Qt::UserRole).toInt() == groupId)
-        {
-            return true;
-        }
-    }
-    return false;
-}
-
-void MainWindow::addFriendItem(int friendId, const QString &friendName, const QString &state)
-{
-    if (hasFriendItem(friendId))
-    {
-        return;
-    }
-
-    QString text = QString("%1 %2 %3").arg(friendId).arg(friendName).arg(state);
-    auto *item = new QListWidgetItem(text, m_friendListWidget);
-    item->setData(Qt::UserRole, friendId);
-    item->setData(Qt::UserRole + 1, friendName);
-}
-
-void MainWindow::addGroupItem(int groupId, const QString &groupName, const QString &groupDesc)
-{
-    if (hasGroupItem(groupId))
-    {
-        return;
-    }
-
-    QString text = groupDesc.isEmpty()
-        ? QString("%1 %2").arg(groupId).arg(groupName)
-        : QString("%1 %2 - %3").arg(groupId).arg(groupName).arg(groupDesc);
-
-    auto *item = new QListWidgetItem(text, m_groupListWidget);
-    item->setData(Qt::UserRole, groupId);
-    item->setData(Qt::UserRole + 1, groupName);
+    m_groupModel->addGroup(groupId, groupName, groupDesc);
 }

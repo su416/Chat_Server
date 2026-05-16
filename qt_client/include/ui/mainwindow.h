@@ -5,9 +5,10 @@
 #include <QJsonObject>
 
 class QLabel;
-class QListWidget;
-class QListWidgetItem;
+class QListView;
 class QPushButton;
+class FriendListModel;
+class GroupListModel;
 
 class MainWindow : public QMainWindow
 {
@@ -15,9 +16,10 @@ class MainWindow : public QMainWindow
 
 public:
     explicit MainWindow(QWidget *parent = nullptr);
+
     void loadFromLoginResponse(const QJsonObject &response);
-        void setStatusMessage(const QString &text);
-            void addFriendItem(int friendId, const QString &friendName, const QString &state);
+    void setStatusMessage(const QString &text);
+    void addFriendItem(int friendId, const QString &friendName, const QString &state);
     void addGroupItem(int groupId, const QString &groupName, const QString &groupDesc);
 
 signals:
@@ -28,20 +30,16 @@ signals:
     void friendChatRequested(int friendId, const QString &friendName);
     void groupChatRequested(int groupId, const QString &groupName);
 
-private:   
-    void initUi();
-    QString parseFriendItem(const QJsonValue &value) const;
-    QString parseGroupItem(const QJsonValue &value) const;
-    bool hasFriendItem(int friendId) const;
-    bool hasGroupItem(int groupId) const;
-
-
 private:
+    void initUi();
+
     QLabel *m_userInfoLabel;
     QLabel *m_statusLabel;
 
-    QListWidget *m_friendListWidget;
-    QListWidget *m_groupListWidget;
+    QListView *m_friendListView;
+    QListView *m_groupListView;
+    FriendListModel *m_friendModel;
+    GroupListModel *m_groupModel;
 
     QPushButton *m_addFriendButton;
     QPushButton *m_createGroupButton;

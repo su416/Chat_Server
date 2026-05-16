@@ -15,6 +15,7 @@ include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}/include/network
     ${CMAKE_CURRENT_SOURCE_DIR}/include/service
     ${CMAKE_CURRENT_SOURCE_DIR}/include/controller
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/model
 )
 
 add_executable(QtChatClient
@@ -30,18 +31,8 @@ add_executable(QtChatClient
     src/network/chatclient.cpp
     src/controller/clientcontroller.cpp
     src/service/sessionmanager.cpp
-include/service/sessionmanager.h
-    include/ui/loginwindow.h
-    include/ui/mainwindow.h
-    include/ui/registerdialog.h
-    include/ui/addfrienddialog.h
-    include/ui/creategroupdialog.h
-    include/ui/joingroupdialog.h
-    include/ui/chatwindow.h
-    include/ui/groupchatwindow.h
-    include/network/chatclient.h
-    include/controller/clientcontroller.h
-    
+    src/model/friendlistmodel.cpp
+    src/model/grouplistmodel.cpp
 )
 
 target_link_libraries(QtChatClient PRIVATE Qt6::Widgets Qt6::Network)
