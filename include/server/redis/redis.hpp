@@ -34,6 +34,9 @@ public:
     void init_notify_handler(function<void(int, string)> fn);
 
 private:
+    // 重新连接两个上下文（observer 线程退出后自动重连）
+    bool reconnect();
+
     // hiredis同步上下文对象，负责publish消息
     redisContext *_publish_context;
 

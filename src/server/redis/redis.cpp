@@ -1,6 +1,8 @@
 #include "redis.hpp"
 #include "config.hpp"
 #include <muduo/base/Logging.h>
+#include <chrono>
+#include <thread>
 #include <iostream>
 using namespace std;
 
@@ -132,28 +134,67 @@ bool Redis::unsubscribe(int channel)
     return true;
 }
 
-// 在独立线程中接收订阅通道中的消息
+// 在独立线程中接收订阅通道中的消息（断线自动重连）
 void Redis::observer_channel_message()
 {
-    redisReply *reply = nullptr;
-    while (REDIS_OK == redisGetReply(this->_subcribe_context, (void **)&reply))
+    while (true)
     {
-        // 订阅收到的消息是一个带三元素的数组：
-        // element[0]="message", element[1]=通道号, element[2]=消息体
-        if (reply != nullptr
-            && reply->type == REDIS_REPLY_ARRAY
-            && reply->elements >= 3
-            && reply->element[1] != nullptr && reply->element[1]->str != nullptr
-            && reply->element[2] != nullptr && reply->element[2]->str != nullptr)
+        redisReply *reply = nullptr;
+        while (_subcribe_context != nullptr &&
+               REDIS_OK == redisGetReply(this->_subcribe_context, (void **)&reply))
         {
-            // 给业务层上报通道上发生的消息
-            _notify_message_handler(atoi(reply->element[1]->str) , reply->element[2]->str);
+            if (reply != nullptr
+                && reply->type == REDIS_REPLY_ARRAY
+                && reply->elements >= 3
+                && reply->element[1] != nullptr && reply->element[1]->str != nullptr
+                && reply->element[2] != nullptr && reply->element[2]->str != nullptr)
+            {
+                _notify_message_handler(atoi(reply->element[1]->str),
+                                        reply->element[2]->str);
+            }
+            freeReplyObject(reply);
         }
 
-        freeReplyObject(reply);
+        LOG_ERROR << "redis observer lost connection, retrying in 3s...";
+
+        // 等待后尝试重连
+        this_thread::sleep_for(chrono::seconds(3));
+        if (!reconnect())
+        {
+            LOG_ERROR << "redis reconnect failed, retrying in 3s...";
+            continue;
+        }
+        LOG_INFO << "redis observer reconnected";
+    }
+}
+
+bool Redis::reconnect()
+{
+    string host = Config::instance().getRedisHost();
+    uint16_t port = Config::instance().getRedisPort();
+
+    // 释放旧连接
+    if (_subcribe_context)
+    {
+        redisFree(_subcribe_context);
+        _subcribe_context = nullptr;
+    }
+    if (_publish_context)
+    {
+        redisFree(_publish_context);
+        _publish_context = nullptr;
     }
 
-    LOG_ERROR << ">>>>>>>>>>>>> observer_channel_message quit <<<<<<<<<<<<<";
+    // 重建两个上下文
+    _publish_context = redisConnect(host.c_str(), port);
+    if (_publish_context == nullptr || _publish_context->err)
+        return false;
+
+    _subcribe_context = redisConnect(host.c_str(), port);
+    if (_subcribe_context == nullptr || _subcribe_context->err)
+        return false;
+
+    return true;
 }
 
 void Redis::init_notify_handler(function<void(int,string)> fn)
