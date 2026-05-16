@@ -4,6 +4,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QPushButton>
+#include <QShortcut>
 #include <QTextEdit>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -44,6 +45,10 @@ void ChatWindow::initUi()
     mainLayout->addLayout(inputLayout);
 
     connect(m_sendButton, &QPushButton::clicked, this, &ChatWindow::onSendClicked);
+
+    // Ctrl+Enter 发送
+    auto *shortcut = new QShortcut(QKeySequence("Ctrl+Return"), this);
+    connect(shortcut, &QShortcut::activated, this, &ChatWindow::onSendClicked);
 }
 
 void ChatWindow::setChatPeer(int peerId, const QString &peerName)

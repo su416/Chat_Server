@@ -3,6 +3,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QPushButton>
+#include <QShortcut>
 #include <QTextEdit>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -43,6 +44,10 @@ void GroupChatWindow::initUi()
     mainLayout->addLayout(inputLayout);
 
     connect(m_sendButton, &QPushButton::clicked, this, &GroupChatWindow::onSendClicked);
+
+    // Ctrl+Enter 发送
+    auto *shortcut = new QShortcut(QKeySequence("Ctrl+Return"), this);
+    connect(shortcut, &QShortcut::activated, this, &GroupChatWindow::onSendClicked);
 }
 
 void GroupChatWindow::setGroupInfo(int groupId, const QString &groupName)

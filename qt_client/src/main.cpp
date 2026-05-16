@@ -1,4 +1,6 @@
 #include <QApplication>
+#include <QFile>
+#include <QSettings>
 
 #include "ui/loginwindow.h"
 #include "ui/mainwindow.h"
@@ -15,6 +17,16 @@
 int main(int argc, char *argv[])
 {
     QApplication app(argc, argv);
+    app.setApplicationName("ChatClient");
+    app.setOrganizationName("ChatApp");
+
+    // 加载 QSS 样式表
+    QFile styleFile("style.qss");
+    if (styleFile.open(QFile::ReadOnly))
+    {
+        app.setStyleSheet(styleFile.readAll());
+        styleFile.close();
+    }
 
     LoginWindow loginWindow;
     MainWindow mainWindow;
@@ -38,6 +50,17 @@ int main(int argc, char *argv[])
                                 client,
                                 session);
 
+    // 恢复上次窗口位置/大小
+    QSettings settings;
+    if (settings.contains("mainwindow/geometry"))
+        mainWindow.restoreGeometry(settings.value("mainwindow/geometry").toByteArray());
+
     loginWindow.show();
-    return app.exec();
+
+    int ret = app.exec();
+
+    // 退出时保存窗口位置
+    settings.setValue("mainwindow/geometry", mainWindow.saveGeometry());
+
+    return ret;
 }

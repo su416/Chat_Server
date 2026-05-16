@@ -59,6 +59,7 @@ void MainWindow::initUi()
     m_createGroupButton = new QPushButton("Create Group", this);
     m_joinGroupButton = new QPushButton("Join Group", this);
     m_logoutButton = new QPushButton("Logout", this);
+    m_logoutButton->setObjectName("logoutButton");
 
     // ---- 布局 ----
 
