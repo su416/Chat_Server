@@ -4,6 +4,7 @@
 #include "jsoncodec.hpp"
 #include "password_utils.hpp"
 #include "rate_limiter.hpp"
+#include "db_thread_pool.hpp"
 #include <muduo/base/Logging.h>
 #include <vector>
 #include "proto_utils.hpp"
@@ -290,8 +291,10 @@ void ChatService::oneChat(const TcpConnectionPtr &conn, json &js, Timestamp time
         return;
     }
 
-    // 先落库单聊历史消息
-    _chatHistoryModel.insertOneChat(fromid, toid, msg);
+    // 异步落库单聊历史消息（不阻塞 IO 线程）
+    DBThreadPool::instance()->submitVoid([this, fromid, toid, msg]() {
+        _chatHistoryModel.insertOneChat(fromid, toid, msg);
+    });
 
     {
         shared_lock<shared_mutex> lock(_connMutex);
@@ -316,8 +319,13 @@ void ChatService::oneChat(const TcpConnectionPtr &conn, json &js, Timestamp time
         LOG_ERROR << "redis publish failed, fallback to offline storage";
     }
 
-    // toid 不在线（或 Redis 不可用），存储离线消息
-    _offlineMsgModel.insert(toid, js.dump());
+    // toid 不在线（或 Redis 不可用），异步存储离线消息
+    {
+        string msgDump = js.dump();
+        DBThreadPool::instance()->submitVoid([this, toid, msgDump]() {
+            _offlineMsgModel.insert(toid, msgDump);
+        });
+    }
 }
 
 // 添加好友业务
@@ -482,8 +490,10 @@ void ChatService::groupChat(const TcpConnectionPtr &conn, json &js, Timestamp ti
         return;
     }
 
-    // 先落库群聊历史消息
-    _chatHistoryModel.insertGroupChat(userid, groupid, msg);
+    // 异步落库群聊历史消息（不阻塞 IO 线程）
+    DBThreadPool::instance()->submitVoid([this, userid, groupid, msg]() {
+        _chatHistoryModel.insertGroupChat(userid, groupid, msg);
+    });
 
     vector<int> useridVec = _groupModel.queryGroupUsers(userid, groupid);
 
@@ -524,13 +534,20 @@ void ChatService::groupChat(const TcpConnectionPtr &conn, json &js, Timestamp ti
             {
                 if (!_redis.publish(id, js.dump()))
                 {
-                    // Redis 不可用，降级为本地离线存储
-                    _offlineMsgModel.insert(id, js.dump());
+                    // Redis 不可用，降级为本地离线存储（异步）
+                    string msgDump = js.dump();
+                    DBThreadPool::instance()->submitVoid([this, id, msgDump]() {
+                        _offlineMsgModel.insert(id, msgDump);
+                    });
                 }
             }
             else
             {
-                _offlineMsgModel.insert(id, js.dump());
+                // 异步存储离线群消息
+                string msgDump = js.dump();
+                DBThreadPool::instance()->submitVoid([this, id, msgDump]() {
+                    _offlineMsgModel.insert(id, msgDump);
+                });
             }
         }
     }

@@ -3,6 +3,7 @@
 #include "config.hpp"
 #include "connectionpool.h"
 #include "rate_limiter.hpp"
+#include "db_thread_pool.hpp"
 #include <iostream>
 #include <signal.h>
 #include "chat.pb.h"
@@ -47,6 +48,9 @@ int main(int argc, char **argv)
             );
         }
     }
+
+    // 初始化 DB 线程池（用于异步 DB 写入，线程数 = Muduo 线程数）
+    DBThreadPool::instance()->init(Config::instance().getThreadNum());
 
     signal(SIGINT, resetHandler);
 
