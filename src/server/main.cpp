@@ -52,6 +52,9 @@ int main(int argc, char **argv)
     // 初始化 DB 线程池（用于异步 DB 写入，线程数 = Muduo 线程数）
     DBThreadPool::instance()->init(Config::instance().getThreadNum());
 
+    // 触发 ChatService 单例初始化（连接 Redis、注册消息处理器）
+    ChatService::instance();
+
     signal(SIGINT, resetHandler);
 
     EventLoop loop;
