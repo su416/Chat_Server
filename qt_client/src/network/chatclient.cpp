@@ -16,31 +16,37 @@ ChatClient::ChatClient(QObject *parent)
     connect(m_socket, &QTcpSocket::errorOccurred, this, &ChatClient::onErrorOccurred);
 }
 
+void ChatClient::setAutoReconnect(bool enabled)
+{
+    m_autoReconnect = enabled;
+}
+
 void ChatClient::connectToServer(const QString &host, quint16 port)
 {
-    if (m_socket->state() == QAbstractSocket::ConnectedState)
-    {
-        return;
-    }
+    m_host = host;
+    m_port = port;
 
+    if (m_socket->state() == QAbstractSocket::ConnectedState)
+        return;
+
+    m_recvBuf.clear();
     m_socket->connectToHost(host, port);
 }
 
-void ChatClient::sendLoginRequest(int userId, const QString &password)
+void ChatClient::disconnectFromServer()
 {
-    QJsonObject obj;
-    obj["msgid"] = 1;       // LOGIN_MSG
-    obj["id"] = userId;
-    obj["password"] = password;
-
-    sendJson(obj);
+    m_autoReconnect = false;   // 主动断开时不重连
+    if (m_socket->state() != QAbstractSocket::UnconnectedState)
+    {
+        m_socket->disconnectFromHost();
+    }
 }
+
+// ---- 内部 ----
 
 void ChatClient::sendJson(const QJsonObject &obj)
 {
     QByteArray data = QJsonDocument(obj).toJson(QJsonDocument::Compact);
-
-    // 兼容你当前命令行客户端的发送方式：末尾带 '\0'
     data.append('\0');
 
     qint64 len = m_socket->write(data);
@@ -50,34 +56,76 @@ void ChatClient::sendJson(const QJsonObject &obj)
     }
 }
 
+// ---- 网络事件 ----
+
 void ChatClient::onConnected()
 {
+    m_recvBuf.clear();
     emit connected();
 }
 
 void ChatClient::onDisconnected()
 {
     emit disconnected();
+
+    // 断线自动重连（指数退避 2s / 4s / 8s，最大 16s）
+    if (m_autoReconnect && !m_host.isEmpty() && m_port > 0)
+    {
+        static int s_retryDelay = 2000;
+
+        QTimer::singleShot(s_retryDelay, this, [this]() {
+            if (m_socket->state() == QAbstractSocket::UnconnectedState)
+            {
+                qDebug() << "reconnecting to" << m_host << m_port
+                         << "after" << s_retryDelay << "ms";
+                m_socket->connectToHost(m_host, m_port);
+            }
+        });
+
+        s_retryDelay = qMin(s_retryDelay * 2, 16000);
+    }
 }
 
 void ChatClient::onReadyRead()
 {
-    QByteArray data = m_socket->readAll();
+    // 追加到缓冲区
+    m_recvBuf.append(m_socket->readAll());
 
-    while (!data.isEmpty() && data.back() == '\0')
+    // 按 \0 分隔符逐帧解析
+    while (true)
     {
-        data.chop(1);
-    }
+        int idx = m_recvBuf.indexOf('\0');
+        if (idx == -1)
+            break;  // 没有完整帧，等待下次数据到达
 
-    QJsonParseError error;
-    QJsonDocument doc = QJsonDocument::fromJson(data, &error);
-    if (error.error != QJsonParseError::NoError || !doc.isObject())
-    {
-        emit networkError("invalid json response from server");
-        return;
-    }
+        QByteArray frame = m_recvBuf.left(idx);
+        m_recvBuf.remove(0, idx + 1);
 
-    QJsonObject obj = doc.object();
+        if (frame.isEmpty())
+            continue;
+
+        QJsonParseError error;
+        QJsonDocument doc = QJsonDocument::fromJson(frame, &error);
+        if (error.error != QJsonParseError::NoError || !doc.isObject())
+        {
+            qDebug() << "invalid json frame:" << error.errorString()
+                     << "data:" << frame.left(80);
+            continue;
+        }
+
+        dispatchMessage(doc.object());
+    }
+}
+
+void ChatClient::onErrorOccurred(QAbstractSocket::SocketError)
+{
+    emit networkError(m_socket->errorString());
+}
+
+// ---- 消息分发 ----
+
+void ChatClient::dispatchMessage(const QJsonObject &obj)
+{
     int msgid = obj.value("msgid").toInt();
 
     // LOGIN_MSG_ACK = 2
@@ -92,9 +140,7 @@ void ChatClient::onReadyRead()
         {
             QString reason = obj.value("errmsg").toString();
             if (reason.isEmpty())
-            {
                 reason = "login failed";
-            }
             emit loginFailed(reason);
         }
         return;
@@ -113,9 +159,7 @@ void ChatClient::onReadyRead()
         {
             QString reason = obj.value("errmsg").toString();
             if (reason.isEmpty())
-            {
                 reason = "register failed";
-            }
             emit registerFailed(reason);
         }
         return;
@@ -161,7 +205,7 @@ void ChatClient::onReadyRead()
         return;
     }
 
-        // QUERY_GROUP_CHAT_HISTORY_MSG_ACK = 14
+    // QUERY_GROUP_CHAT_HISTORY_MSG_ACK = 14
     if (msgid == 14)
     {
         int err = obj.value("errno").toInt();
@@ -177,7 +221,8 @@ void ChatClient::onReadyRead()
         return;
     }
 
-        if (msgid == 15)
+    // ADD_FRIEND_MSG_ACK = 15
+    if (msgid == 15)
     {
         int err = obj.value("errno").toInt();
         if (err == 0)
@@ -195,6 +240,7 @@ void ChatClient::onReadyRead()
         return;
     }
 
+    // CREATE_GROUP_MSG_ACK = 16
     if (msgid == 16)
     {
         int err = obj.value("errno").toInt();
@@ -213,6 +259,7 @@ void ChatClient::onReadyRead()
         return;
     }
 
+    // ADD_GROUP_MSG_ACK = 17
     if (msgid == 17)
     {
         int err = obj.value("errno").toInt();
@@ -234,9 +281,15 @@ void ChatClient::onReadyRead()
     qDebug() << "Unhandled response:" << obj;
 }
 
-void ChatClient::onErrorOccurred(QAbstractSocket::SocketError)
+// ---- 请求发送 ----
+
+void ChatClient::sendLoginRequest(int userId, const QString &password)
 {
-    emit networkError(m_socket->errorString());
+    QJsonObject obj;
+    obj["msgid"] = 1;       // LOGIN_MSG
+    obj["id"] = userId;
+    obj["password"] = password;
+    sendJson(obj);
 }
 
 void ChatClient::sendRegisterRequest(const QString &name, const QString &password)
@@ -245,9 +298,9 @@ void ChatClient::sendRegisterRequest(const QString &name, const QString &passwor
     obj["msgid"] = 4;   // REG_MSG
     obj["name"] = name;
     obj["password"] = password;
-
     sendJson(obj);
 }
+
 void ChatClient::sendOneChatRequest(int userId,
                                     int toId,
                                     const QString &name,
@@ -261,20 +314,17 @@ void ChatClient::sendOneChatRequest(int userId,
     obj["name"] = name;
     obj["msg"] = msg;
     obj["time"] = time;
-
     sendJson(obj);
 }
 
 void ChatClient::sendQueryOneChatHistoryRequest(int userId, int limit)
 {
     QJsonObject obj;
-    obj["msgid"] = 11;   // QUERY_ONE_CHAT_HISTORY_MSG
+    obj["msgid"] = 11;  // QUERY_ONE_CHAT_HISTORY_MSG
     obj["id"] = userId;
     obj["limit"] = limit;
-
     sendJson(obj);
 }
-
 
 void ChatClient::sendAddFriendRequest(int userId, int friendId)
 {
@@ -282,7 +332,6 @@ void ChatClient::sendAddFriendRequest(int userId, int friendId)
     obj["msgid"] = 7;   // ADD_FRIEND_MSG
     obj["id"] = userId;
     obj["friendid"] = friendId;
-
     sendJson(obj);
 }
 
@@ -295,10 +344,8 @@ void ChatClient::sendCreateGroupRequest(int userId,
     obj["id"] = userId;
     obj["groupname"] = groupName;
     obj["groupdesc"] = groupDesc;
-
     sendJson(obj);
 }
-
 
 void ChatClient::sendJoinGroupRequest(int userId, int groupId)
 {
@@ -306,10 +353,8 @@ void ChatClient::sendJoinGroupRequest(int userId, int groupId)
     obj["msgid"] = 9;   // ADD_GROUP_MSG
     obj["id"] = userId;
     obj["groupid"] = groupId;
-
     sendJson(obj);
 }
-
 
 void ChatClient::sendGroupChatRequest(int userId,
                                       int groupId,
@@ -324,17 +369,15 @@ void ChatClient::sendGroupChatRequest(int userId,
     obj["name"] = name;
     obj["msg"] = msg;
     obj["time"] = time;
-
     sendJson(obj);
 }
 
 void ChatClient::sendQueryGroupChatHistoryRequest(int groupId, int limit)
 {
     QJsonObject obj;
-    obj["msgid"] = 13;   // QUERY_GROUP_CHAT_HISTORY_MSG
+    obj["msgid"] = 13;  // QUERY_GROUP_CHAT_HISTORY_MSG
     obj["groupid"] = groupId;
     obj["limit"] = limit;
-
     sendJson(obj);
 }
 
@@ -343,15 +386,5 @@ void ChatClient::sendLogoutRequest(int userId)
     QJsonObject obj;
     obj["msgid"] = 3;   // LOGINOUT_MSG
     obj["id"] = userId;
-
     sendJson(obj);
 }
-
-void ChatClient::disconnectFromServer()
-{
-    if (m_socket->state() != QAbstractSocket::UnconnectedState)
-    {
-        m_socket->disconnectFromHost();
-    }
-}
-

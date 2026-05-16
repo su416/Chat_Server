@@ -5,6 +5,7 @@
 #include <QTcpSocket>
 #include <QJsonObject>
 #include <QJsonArray>
+#include <QTimer>
 
 class ChatClient : public QObject
 {
@@ -30,10 +31,13 @@ public:
                               const QString &name,
                               const QString &msg,
                               const QString &time);
-                                  void sendQueryGroupChatHistoryRequest(int groupId, int limit);
-void sendLogoutRequest(int userId);
+    void sendQueryGroupChatHistoryRequest(int groupId, int limit);
+    void sendLogoutRequest(int userId);
 
-void disconnectFromServer();
+    void disconnectFromServer();
+
+    // 设置断线自动重连（默认开启）
+    void setAutoReconnect(bool enabled);
 
 signals:
     void connected();
@@ -62,7 +66,7 @@ signals:
                                   const QString &msg,
                                   const QString &time);
 
-                                      void groupChatHistoryReceived(int groupId, const QJsonArray &history);
+    void groupChatHistoryReceived(int groupId, const QJsonArray &history);
 
 
 private slots:
@@ -73,10 +77,13 @@ private slots:
 
 private:
     void sendJson(const QJsonObject &obj);
+    void dispatchMessage(const QJsonObject &obj);
 
-private:
     QTcpSocket *m_socket;
+    QByteArray m_recvBuf;        // 接收缓冲区，处理 TCP 粘包
+    QString m_host;              // 上次连接的地址，用于自动重连
+    quint16 m_port = 0;
+    bool m_autoReconnect = true;
 };
 
 #endif
-
