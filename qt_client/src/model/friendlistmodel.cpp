@@ -81,3 +81,5 @@ QString FriendListModel::friendNameAt(int row) const
     if (row < 0 || row >= m_friends.size()) return {};
     return m_friends[row].name;
 }
+
+

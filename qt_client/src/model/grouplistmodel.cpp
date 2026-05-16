@@ -71,3 +71,6 @@ QString GroupListModel::groupNameAt(int row) const
     if (row < 0 || row >= m_groups.size()) return {};
     return m_groups[row].name;
 }
+
+#include "moc_grouplistmodel.cpp"
+
