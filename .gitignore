@@ -27,10 +27,18 @@ compile_commands.json
 *.a
 *.out
 
-# logs / perf
+# logs / perf / debug
 *.log
 perf.data*
 core
+core.*
+valgrind.log
+asan.log
+server*.log
+
+# Claude AI
+.claude/
+CLAUDE.md
 
 # editor
 .vscode/
@@ -46,8 +54,15 @@ moc_*
 qrc_*.cpp
 ui_*.h
 
-# temporary
-*.swp
-*.swo
+# backup files
+*.bak
 *~
+
+# macOS
 .DS_Store
+
+# bench output (generated JSON reports)
+docs/bench_results/
+
+# personal scripts
+autobuild.sh

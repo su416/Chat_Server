@@ -1,16 +1,30 @@
 #include "groupmodel.hpp"
 #include "db.h"
 #include "connectionpool.h"
+#include <cstring>
+using namespace std;
 
 // 创建群组
 bool GroupModel::createGroup(Group &group)
 {
-    char sql[1024] = {0};
-    sprintf(sql, "insert into allgroup(groupname, groupdesc) values('%s', '%s')",
-            group.getName().c_str(), group.getDesc().c_str());
+    const string sql = "insert into allgroup(groupname, groupdesc) values(?, ?)";
+
+    string groupName = group.getName();
+    string groupDesc = group.getDesc();
+
+    MYSQL_BIND bind[2];
+    memset(bind, 0, sizeof(bind));
+
+    bind[0].buffer_type = MYSQL_TYPE_STRING;
+    bind[0].buffer = const_cast<char*>(groupName.c_str());
+    bind[0].buffer_length = static_cast<unsigned long>(groupName.size());
+
+    bind[1].buffer_type = MYSQL_TYPE_STRING;
+    bind[1].buffer = const_cast<char*>(groupDesc.c_str());
+    bind[1].buffer_length = static_cast<unsigned long>(groupDesc.size());
 
     auto mysql = ConnectionPool::instance()->getConnection();
-    if (mysql->update(sql))
+    if (mysql->executePrepared(sql, bind, 2))
     {
         group.setId(mysql_insert_id(mysql->getConnection()));
         return true;
@@ -22,12 +36,25 @@ bool GroupModel::createGroup(Group &group)
 // 加入群组
 bool GroupModel::addGroup(int userid, int groupid, string role)
 {
-    char sql[1024] = {0};
-    sprintf(sql, "insert into groupuser values(%d, %d, '%s')",
-            groupid, userid, role.c_str());
+    const string sql = "insert into groupuser values(?, ?, ?)";
+
+    MYSQL_BIND bind[3];
+    memset(bind, 0, sizeof(bind));
+
+    bind[0].buffer_type = MYSQL_TYPE_LONG;
+    bind[0].buffer = reinterpret_cast<char*>(&groupid);
+    bind[0].is_unsigned = false;
+
+    bind[1].buffer_type = MYSQL_TYPE_LONG;
+    bind[1].buffer = reinterpret_cast<char*>(&userid);
+    bind[1].is_unsigned = false;
+
+    bind[2].buffer_type = MYSQL_TYPE_STRING;
+    bind[2].buffer = const_cast<char*>(role.c_str());
+    bind[2].buffer_length = static_cast<unsigned long>(role.size());
 
     auto mysql = ConnectionPool::instance()->getConnection();
-    return mysql->update(sql);
+    return mysql->executePrepared(sql, bind, 3);
 }
 
 // 查询用户所在群组信息

@@ -275,7 +275,7 @@ void ChatService::clientCloseException(const TcpConnectionPtr &conn)
 
 // 一对一聊天业务
 void ChatService::oneChat(const TcpConnectionPtr &conn, json &js, Timestamp time)
-{
+{           
     int fromid = js["id"].get<int>();
     int toid = js["toid"].get<int>();
     string msg = js["msg"];
@@ -356,8 +356,8 @@ void ChatService::addFriend(const TcpConnectionPtr &conn, json &js, Timestamp ti
         return;
     }
 
-    // 再插入好友关系
-    if (!_friendModel.insert(userid, friendid))
+    // 插入双向好友关系
+    if (!_friendModel.insert(userid, friendid) || !_friendModel.insert(friendid, userid))
     {
         response["errno"] = 1;
         response["errmsg"] = "add friend failed";
@@ -371,6 +371,34 @@ void ChatService::addFriend(const TcpConnectionPtr &conn, json &js, Timestamp ti
     response["state"] = friendUser.getState();
 
     sendTcpJson(conn, response);
+
+    // 通知被添加方（如果在线上，让对方好友列表同步刷新）
+    {
+        User selfUser = _userModel.query(userid);
+        json notify;
+        notify["msgid"] = ADD_FRIEND_MSG_ACK;
+        notify["errno"] = 0;
+        notify["friendid"] = selfUser.getId();
+        notify["friendname"] = selfUser.getName();
+        notify["state"] = selfUser.getState();
+
+        // 本地在线 → 直接推送
+        {
+            shared_lock<shared_mutex> lock(_connMutex);
+            auto it = _userConnMap.find(friendid);
+            if (it != _userConnMap.end())
+            {
+                sendTcpJson(it->second, notify);
+                return;
+            }
+        }
+
+        // 跨服在线 → Redis 推送
+        if (friendUser.getState() == "online")
+        {
+            _redis.publish(friendid, notify.dump());
+        }
+    }
 }
 
 // 创建群组业务

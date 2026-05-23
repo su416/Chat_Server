@@ -2,20 +2,36 @@
 #include "db.h"
 #include "connectionpool.h"
 #include "password_utils.hpp"
+#include <cstring>
 #include <iostream>
 using namespace std;
 
 // User表的增加方法
 bool UserModel::insert(User &user)
 {
-    // 1.组装sql语句（密码做 SHA-256 哈希后存储）
-    char sql[1024] = {0};
+    const string sql = "insert into user(name, password, state) values(?, ?, ?)";
+
+    string name = user.getName();
     string hashedPwd = PasswordUtils::hashPassword(user.getPwd());
-    sprintf(sql, "insert into user(name, password, state) values('%s', '%s', '%s')",
-            user.getName().c_str(), hashedPwd.c_str(), user.getState().c_str());
+    string state = user.getState();
+
+    MYSQL_BIND bind[3];
+    memset(bind, 0, sizeof(bind));
+
+    bind[0].buffer_type = MYSQL_TYPE_STRING;
+    bind[0].buffer = const_cast<char*>(name.c_str());
+    bind[0].buffer_length = static_cast<unsigned long>(name.size());
+
+    bind[1].buffer_type = MYSQL_TYPE_STRING;
+    bind[1].buffer = const_cast<char*>(hashedPwd.c_str());
+    bind[1].buffer_length = static_cast<unsigned long>(hashedPwd.size());
+
+    bind[2].buffer_type = MYSQL_TYPE_STRING;
+    bind[2].buffer = const_cast<char*>(state.c_str());
+    bind[2].buffer_length = static_cast<unsigned long>(state.size());
 
     auto mysql = ConnectionPool::instance()->getConnection();
-    if (mysql->update(sql))
+    if (mysql->executePrepared(sql, bind, 3))
     {
         // 获取插入成功的用户数据生成的主键id
         user.setId(mysql_insert_id(mysql->getConnection()));
@@ -55,26 +71,47 @@ User UserModel::query(int id)
 // 更新用户的状态信息
 bool UserModel::updateState(User user)
 {
-    // 1.组装sql语句
-    char sql[1024] = {0};
-    sprintf(sql, "update user set state = '%s' where id = %d", user.getState().c_str(), user.getId());
+    const string sql = "update user set state = ? where id = ?";
+
+    string state = user.getState();
+    int userId = user.getId();
+
+    MYSQL_BIND bind[2];
+    memset(bind, 0, sizeof(bind));
+
+    bind[0].buffer_type = MYSQL_TYPE_STRING;
+    bind[0].buffer = const_cast<char*>(state.c_str());
+    bind[0].buffer_length = static_cast<unsigned long>(state.size());
+
+    bind[1].buffer_type = MYSQL_TYPE_LONG;
+    bind[1].buffer = reinterpret_cast<char*>(&userId);
+    bind[1].is_unsigned = false;
 
     auto mysql = ConnectionPool::instance()->getConnection();
-    if (mysql->update(sql))
-    {
-        return true;
-    }
-    return false;
+    return mysql->executePrepared(sql, bind, 2);
 }
 
 // 重置用户的状态信息
 void UserModel::resetState()
 {
-    // 1.组装sql语句
-    char sql[1024] = "update user set state = 'offline' where state = 'online'";
+    const string sql = "update user set state = ? where state = ?";
+
+    string offline = "offline";
+    string online = "online";
+
+    MYSQL_BIND bind[2];
+    memset(bind, 0, sizeof(bind));
+
+    bind[0].buffer_type = MYSQL_TYPE_STRING;
+    bind[0].buffer = const_cast<char*>(offline.c_str());
+    bind[0].buffer_length = static_cast<unsigned long>(offline.size());
+
+    bind[1].buffer_type = MYSQL_TYPE_STRING;
+    bind[1].buffer = const_cast<char*>(online.c_str());
+    bind[1].buffer_length = static_cast<unsigned long>(online.size());
 
     auto mysql = ConnectionPool::instance()->getConnection();
-    mysql->update(sql);
+    mysql->executePrepared(sql, bind, 2);
 }
 
 // 批量查询用户状态（群聊扇出优化：N 次单独查询 → 1 次批量查询）

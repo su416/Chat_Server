@@ -1,16 +1,27 @@
 #include "friendmodel.hpp"
 #include "db.h"
 #include "connectionpool.h"
+#include <cstring>
+using namespace std;
 
 // 添加好友关系
 bool FriendModel::insert(int userid, int friendid)
 {
-    // 1.组装sql语句
-    char sql[1024] = {0};
-    sprintf(sql, "insert into friend values(%d, %d)", userid, friendid);
+    const string sql = "insert into friend values(?, ?)";
+
+    MYSQL_BIND bind[2];
+    memset(bind, 0, sizeof(bind));
+
+    bind[0].buffer_type = MYSQL_TYPE_LONG;
+    bind[0].buffer = reinterpret_cast<char*>(&userid);
+    bind[0].is_unsigned = false;
+
+    bind[1].buffer_type = MYSQL_TYPE_LONG;
+    bind[1].buffer = reinterpret_cast<char*>(&friendid);
+    bind[1].is_unsigned = false;
 
     auto mysql = ConnectionPool::instance()->getConnection();
-    return mysql->update(sql);
+    return mysql->executePrepared(sql, bind, 2);
 }
 
 // 返回用户好友列表
