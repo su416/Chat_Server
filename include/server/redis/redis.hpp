@@ -4,6 +4,7 @@
 #include <hiredis/hiredis.h>
 #include <thread>
 #include <functional>
+#include <mutex>
 using namespace std;
 
 class Redis
@@ -33,8 +34,11 @@ public:
     // 初始化向业务层上报通道消息的回调对象
     void init_notify_handler(function<void(int, string)> fn);
 
+    // 设置重连后回调（observer 重连成功后触发，用于批量恢复订阅）
+    void setReconnectHandler(function<void()> fn);
+
 private:
-    // 重新连接两个上下文（observer 线程退出后自动重连）
+    // 重新连接两个上下文
     bool reconnect();
 
     // hiredis同步上下文对象，负责publish消息
@@ -43,8 +47,14 @@ private:
     // hiredis同步上下文对象，负责subscribe消息
     redisContext *_subcribe_context;
 
+    // 保护 _subcribe_context 的并发访问（observer 线程 + Muduo 线程）
+    mutex _subscribeMutex;
+
     // 回调操作，收到订阅的消息，给service层上报
     function<void(int, string)> _notify_message_handler;
+
+    // 重连后回调，用于批量恢复订阅
+    function<void()> _onReconnect;
 };
 
 #endif

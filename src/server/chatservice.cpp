@@ -58,6 +58,15 @@ ChatService::ChatService()
     {
         // 设置上报消息的回调
         _redis.init_notify_handler(std::bind(&ChatService::handleRedisSubscribeMessage, this, _1, _2));
+
+        // 设置重连后回调：批量恢复所有在线用户的订阅，消除消息丢失窗口
+        _redis.setReconnectHandler([this]() {
+            shared_lock<shared_mutex> lock(_connMutex);
+            for (const auto& [userid, conn] : _userConnMap)
+            {
+                _redis.subscribe(userid);
+            }
+        });
     }
 }
 

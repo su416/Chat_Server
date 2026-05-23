@@ -86,6 +86,8 @@ bool Redis::publish(int channel, string message)
 // 向redis指定的通道subscribe订阅消息
 bool Redis::subscribe(int channel)
 {
+    lock_guard<mutex> lock(_subscribeMutex);
+
     if (_subcribe_context == nullptr)
     {
         LOG_ERROR << "redis subscribe skipped: not connected";
@@ -112,6 +114,8 @@ bool Redis::subscribe(int channel)
 // 向redis指定的通道unsubscribe取消订阅消息
 bool Redis::unsubscribe(int channel)
 {
+    lock_guard<mutex> lock(_subscribeMutex);
+
     if (_subcribe_context == nullptr)
     {
         return false;
@@ -165,6 +169,12 @@ void Redis::observer_channel_message()
             continue;
         }
         LOG_INFO << "redis observer reconnected";
+
+        // 重连成功后触发回调，批量恢复订阅（消除消息丢失窗口）
+        if (_onReconnect)
+        {
+            _onReconnect();
+        }                
     }
 }
 
@@ -200,4 +210,9 @@ bool Redis::reconnect()
 void Redis::init_notify_handler(function<void(int,string)> fn)
 {
     this->_notify_message_handler = fn;
+}
+
+void Redis::setReconnectHandler(function<void()> fn)
+{
+    _onReconnect = std::move(fn);
 }
