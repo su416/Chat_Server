@@ -6,5 +6,6 @@ create table if not exists chatmessage (
     toid int default null,
     groupid int default null,
     msg varchar(1000) not null,
-    send_time datetime not null default current_timestamp
+    send_time datetime not null default current_timestamp,
+    status tinyint not null default 0 comment '0=delivered, 2=offline pending'
 );

@@ -7,62 +7,66 @@
 
 using json = nlohmann::json;
 
-// 存储单聊消息
-void ChatHistoryModel::insertOneChat(int fromid, int toid, const string& msg)
+// 存储单聊消息（status: 0=已送达, 2=离线待投递）
+void ChatHistoryModel::insertOneChat(int fromid, int toid, const string& msg,
+                                     int status)
 {
     auto mysql = ConnectionPool::instance()->getConnection();
 
     const string sql =
-        "insert into chatmessage(fromid, toid, groupid, msg) values(?, ?, null, ?)";
+        "insert into chatmessage(fromid, toid, groupid, msg, status) values(?, ?, null, ?, ?)";
 
-    MYSQL_BIND bind[3];
+    unsigned long msgLength = static_cast<unsigned long>(msg.size());
+
+    MYSQL_BIND bind[4];
     memset(bind, 0, sizeof(bind));
 
-    // 参数1：fromid
     bind[0].buffer_type = MYSQL_TYPE_LONG;
     bind[0].buffer = reinterpret_cast<char*>(&fromid);
 
-    // 参数2：toid
     bind[1].buffer_type = MYSQL_TYPE_LONG;
     bind[1].buffer = reinterpret_cast<char*>(&toid);
 
-    // 参数3：msg
-    unsigned long msgLength = static_cast<unsigned long>(msg.size());
     bind[2].buffer_type = MYSQL_TYPE_STRING;
     bind[2].buffer = const_cast<char*>(msg.c_str());
     bind[2].buffer_length = msgLength;
     bind[2].length = &msgLength;
 
-    mysql->executePrepared(sql, bind, 3);
+    bind[3].buffer_type = MYSQL_TYPE_TINY;
+    bind[3].buffer = reinterpret_cast<char*>(&status);
+
+    mysql->executePrepared(sql, bind, 4);
 }
 
-// 存储群聊消息
-void ChatHistoryModel::insertGroupChat(int fromid, int groupid, const string& msg)
+// 存储群聊消息（status: 0=已送达, 2=离线待投递）
+void ChatHistoryModel::insertGroupChat(int fromid, int groupid, const string& msg,
+                                       int status)
 {
     auto mysql = ConnectionPool::instance()->getConnection();
 
     const string sql =
-        "insert into chatmessage(fromid, toid, groupid, msg) values(?, null, ?, ?)";
+        "insert into chatmessage(fromid, toid, groupid, msg, status) values(?, null, ?, ?, ?)";
 
-    MYSQL_BIND bind[3];
+    unsigned long msgLength = static_cast<unsigned long>(msg.size());
+
+    MYSQL_BIND bind[4];
     memset(bind, 0, sizeof(bind));
 
-    // 参数1：fromid
     bind[0].buffer_type = MYSQL_TYPE_LONG;
     bind[0].buffer = reinterpret_cast<char*>(&fromid);
 
-    // 参数2：groupid
     bind[1].buffer_type = MYSQL_TYPE_LONG;
     bind[1].buffer = reinterpret_cast<char*>(&groupid);
 
-    // 参数3：msg
-    unsigned long msgLength = static_cast<unsigned long>(msg.size());
     bind[2].buffer_type = MYSQL_TYPE_STRING;
     bind[2].buffer = const_cast<char*>(msg.c_str());
     bind[2].buffer_length = msgLength;
     bind[2].length = &msgLength;
 
-    mysql->executePrepared(sql, bind, 3);
+    bind[3].buffer_type = MYSQL_TYPE_TINY;
+    bind[3].buffer = reinterpret_cast<char*>(&status);
+
+    mysql->executePrepared(sql, bind, 4);
 }
 
 // 查询某个用户最近的单聊历史消息
@@ -127,4 +131,43 @@ vector<string> ChatHistoryModel::queryRecentGroupChat(int groupid, int limit)
         mysql_free_result(res);
     }
     return vec;
+}
+
+// 查询离线消息（status=2，登录时推送）
+vector<string> ChatHistoryModel::queryOffline(int userid)
+{
+    char sql[512] = {0};
+    snprintf(sql, sizeof(sql),
+             "select msg from chatmessage "
+             "where toid = %d and status = 2 order by id",
+             userid);
+
+    vector<string> vec;
+    auto mysql = ConnectionPool::instance()->getConnection();
+    MYSQL_RES *res = mysql->query(sql);
+    if (res != nullptr)
+    {
+        MYSQL_ROW row;
+        while ((row = mysql_fetch_row(res)) != nullptr)
+        {
+            vec.push_back(row[0] ? row[0] : "");
+        }
+        mysql_free_result(res);
+    }
+    return vec;
+}
+
+// 标记离线消息为已送达
+void ChatHistoryModel::markDelivered(int userid)
+{
+    const string sql = "update chatmessage set status = 0 where toid = ? and status = 2";
+
+    MYSQL_BIND bind[1];
+    memset(bind, 0, sizeof(bind));
+
+    bind[0].buffer_type = MYSQL_TYPE_LONG;
+    bind[0].buffer = reinterpret_cast<char*>(&userid);
+
+    auto mysql = ConnectionPool::instance()->getConnection();
+    mysql->executePrepared(sql, bind, 1);
 }

@@ -134,13 +134,13 @@ void ChatService::login(const TcpConnectionPtr &conn, json &js, Timestamp time)
             response["id"] = user.getId();
             response["name"] = user.getName();
 
-            // 查询该用户是否有离线消息
-            vector<string> vec = _offlineMsgModel.query(id);
+            // 查询该用户是否有离线消息（从 chatmessage 表，status=2）
+            vector<string> vec = _chatHistoryModel.queryOffline(id);
             if (!vec.empty())
             {
                 response["offlinemsg"] = vec;
-                // 读取该用户的离线消息后，把该用户的所有离线消息删除掉
-                _offlineMsgModel.remove(id);
+                // 标记为已送达
+                _chatHistoryModel.markDelivered(id);
             }
 
             // 查询该用户的好友信息并返回
@@ -328,11 +328,11 @@ void ChatService::oneChat(const TcpConnectionPtr &conn, json &js, Timestamp time
         LOG_ERROR << "redis publish failed, fallback to offline storage";
     }
 
-    // toid 不在线（或 Redis 不可用），异步存储离线消息
+    // toid 不在线（或 Redis 不可用），异步存储离线消息到 chatmessage
     {
         string msgDump = js.dump();
-        DBThreadPool::instance()->submitVoid([this, toid, msgDump]() {
-            _offlineMsgModel.insert(toid, msgDump);
+        DBThreadPool::instance()->submitVoid([this, fromid, toid, msgDump]() {
+            _chatHistoryModel.insertOneChat(fromid, toid, msgDump, 2);
         });
     }
 }
@@ -573,17 +573,17 @@ void ChatService::groupChat(const TcpConnectionPtr &conn, json &js, Timestamp ti
                 {
                     // Redis 不可用，降级为本地离线存储（异步）
                     string msgDump = js.dump();
-                    DBThreadPool::instance()->submitVoid([this, id, msgDump]() {
-                        _offlineMsgModel.insert(id, msgDump);
+                    DBThreadPool::instance()->submitVoid([this, userid, id, msgDump]() {
+                        _chatHistoryModel.insertOneChat(userid, id, msgDump, 2);
                     });
                 }
             }
             else
             {
-                // 异步存储离线群消息
+                // 异步存储离线群消息到 chatmessage（toid=接收者）
                 string msgDump = js.dump();
-                DBThreadPool::instance()->submitVoid([this, id, msgDump]() {
-                    _offlineMsgModel.insert(id, msgDump);
+                DBThreadPool::instance()->submitVoid([this, userid, id, msgDump]() {
+                    _chatHistoryModel.insertOneChat(userid, id, msgDump, 2);
                 });
             }
         }
@@ -601,8 +601,8 @@ void ChatService::handleRedisSubscribeMessage(int userid, string msg)
         return;
     }
 
-    // 存储该用户的离线消息
-    _offlineMsgModel.insert(userid, msg);
+    // 存储该用户的离线消息到 chatmessage
+    _chatHistoryModel.insertOneChat(0, userid, msg, 2);
 }
 
 // 查询单聊历史消息
