@@ -15,7 +15,6 @@ using namespace muduo::net;
 #include "groupmodel.hpp"
 #include "friendmodel.hpp"
 #include "usermodel.hpp"
-#include "offlinemessagemodel.hpp"
 #include "chathistorymodel.hpp"
 #include "json.hpp"
 using json = nlohmann::json;
@@ -72,7 +71,6 @@ private:
 
     // 数据操作类对象
     UserModel _userModel;
-    OfflineMsgModel _offlineMsgModel;
     FriendModel _friendModel;
     GroupModel _groupModel;
     ChatHistoryModel _chatHistoryModel;

@@ -31,8 +31,5 @@ create table if not exists groupuser (
     primary key (groupid, userid)
 ) engine=InnoDB default charset=utf8mb4;
 
--- 离线消息表
-create table if not exists offlinemessage (
-    userid int not null,
-    message varchar(5000) not null
-) engine=InnoDB default charset=utf8mb4;
+-- 离线消息已合并到 chatmessage 表（status=2 表示离线待投递）
+-- chatmessage 表定义见 sql/chat_history.sql
