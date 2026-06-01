@@ -82,4 +82,5 @@ QString FriendListModel::friendNameAt(int row) const
     return m_friends[row].name;
 }
 
+#include "moc_friendlistmodel.cpp"
 
