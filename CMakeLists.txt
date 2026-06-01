@@ -23,5 +23,6 @@ ${PROJECT_SOURCE_DIR}/include/server/utils
     ${Protobuf_INCLUDE_DIRS}
 )
 
+enable_testing()
 add_subdirectory(src)
 add_subdirectory(tests)
