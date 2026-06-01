@@ -23,6 +23,9 @@ public:
     // 定期清理长时间未活跃的用户桶
     void cleanup(int idleSeconds);
 
+    // 重置状态（测试用）
+    void reset();
+
 private:
     RateLimiter() = default;
 

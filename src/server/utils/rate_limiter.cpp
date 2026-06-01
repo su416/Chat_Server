@@ -69,3 +69,10 @@ void RateLimiter::cleanup(int idleSeconds)
             ++it;
     }
 }
+
+void RateLimiter::reset()
+{
+    lock_guard<mutex> lg(_mutex);
+    _buckets.clear();
+    _initialized = false;
+}
