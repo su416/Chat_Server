@@ -1,13 +1,7 @@
 cmake_minimum_required(VERSION 3.16)
 
-# Google Test — 自动下载，无需手动安装
-include(FetchContent)
-FetchContent_Declare(
-  googletest
-  GIT_REPOSITORY https://github.com/google/googletest.git
-  GIT_TAG        v1.14.0
-)
-FetchContent_MakeAvailable(googletest)
+# Google Test — 系统安装版（sudo apt install libgtest-dev libgmock-dev）
+find_package(GTest REQUIRED)
 
 include_directories(
     ${PROJECT_SOURCE_DIR}/include
@@ -20,7 +14,7 @@ include_directories(
     ${PROJECT_SOURCE_DIR}/thirdparty
 )
 
-set(COMMON_LIBS gtest_main gmock_main ssl crypto)
+set(COMMON_LIBS GTest::gtest GTest::gtest_main ssl crypto)
 
 # --- 纯逻辑测试（无外部依赖） ---
 
