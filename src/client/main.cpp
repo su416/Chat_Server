@@ -26,11 +26,11 @@ using json = nlohmann::json;
 User g_currentUser;
 // 记录当前登录用户的好友列表信息
 vector<User> g_currentUserFriendList;
-// 记录当前登录用户的群组列表信息
+// .                                                         记录当前登录用户的群组列表信息
 vector<Group> g_currentUserGroupList;
 
 // 控制主菜单页面程序
-bool isMainMenuRunning = false;
+bool isMainMenuRunning = false;        
 
 // 用于读写线程之间的通信
 sem_t rwsem;

@@ -10,11 +10,20 @@
 
 using namespace std;
 
-// 处理服务器 ctrl+c 结束后，重置 user 的状态信息
+// 全局指针：供信号处理器通知主循环退出
+static EventLoop* g_loop = nullptr;
+
+// 处理服务器 ctrl+c —— 优雅关闭
 void resetHandler(int)
 {
+    // 1. 将所有在线用户标记为 offline
     ChatService::instance()->reset();
-    exit(0);
+
+    // 2. 通知主循环退出（而非 exit(0) 硬杀进程）
+    if (g_loop)
+    {
+        g_loop->quit();
+    }
 }
 
 int main(int argc, char **argv)
@@ -58,6 +67,8 @@ int main(int argc, char **argv)
     signal(SIGINT, resetHandler);
 
     EventLoop loop;
+    g_loop = &loop;
+
     InetAddress addr(
         Config::instance().getServerIp(),
         Config::instance().getServerPort()
@@ -71,7 +82,11 @@ int main(int argc, char **argv)
     );
 
     server.start();
-    loop.loop();
+    loop.loop();  // 阻塞直到 quit() 被调用
 
-    return 0;
+    // 优雅关闭：释放所有资源
+    DBThreadPool::instance()->shutdown();     // 等待 DB 线程结束
+    ConnectionPool::instance()->shutdown();   // 释放 MySQL 连接
+
+    return 0;  // 正常退出，所有析构函数正确执行
 }

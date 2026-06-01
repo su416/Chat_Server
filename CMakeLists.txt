@@ -24,3 +24,4 @@ ${PROJECT_SOURCE_DIR}/include/server/utils
 )
 
 add_subdirectory(src)
+add_subdirectory(tests)

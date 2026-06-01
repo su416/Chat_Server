@@ -1,34 +1,79 @@
 #include "password_utils.hpp"
-#include <openssl/sha.h>
+#include <openssl/evp.h>
+#include <openssl/rand.h>
+#include <openssl/crypto.h>
 #include <sstream>
 #include <iomanip>
 
 namespace PasswordUtils
 {
 
-static std::string sha256(const std::string& input)
+namespace
 {
-    unsigned char digest[SHA256_DIGEST_LENGTH];
-    SHA256(reinterpret_cast<const unsigned char*>(input.c_str()),
-           input.size(), digest);
 
+static std::string toHex(const unsigned char* data, size_t len)
+{
     std::ostringstream oss;
     oss << std::hex << std::setfill('0');
-    for (int i = 0; i < SHA256_DIGEST_LENGTH; ++i)
-        oss << std::setw(2) << static_cast<int>(digest[i]);
+    for (size_t i = 0; i < len; ++i)
+        oss << std::setw(2) << static_cast<int>(data[i]);
     return oss.str();
 }
 
-std::string hashPassword(const std::string& password)
+static size_t fromHex(const std::string& hex, unsigned char* out, size_t maxLen)
 {
-    // 固定服务端盐值，防止彩虹表反查
-    static const std::string SECRET = "ChatServer2024!@#";
-    return sha256(password + SECRET);
+    size_t n = 0;
+    for (size_t i = 0; i + 1 < hex.size() && n < maxLen; i += 2, ++n)
+    {
+        unsigned int byte;
+        sscanf(hex.c_str() + i, "%2x", &byte);
+        out[n] = static_cast<unsigned char>(byte);
+    }
+    return n;
 }
 
-bool verifyPassword(const std::string& password, const std::string& hash)
+constexpr uint64_t SCRYPT_N = 16384;
+constexpr uint64_t SCRYPT_R = 8;
+constexpr uint64_t SCRYPT_P = 1;
+constexpr size_t   SALT_LEN = 16;
+constexpr size_t   KEY_LEN  = 32;
+
+} // anonymous namespace
+
+std::string hashPassword(const std::string& password)
 {
-    return hashPassword(password) == hash;
+    unsigned char salt[SALT_LEN];
+    RAND_bytes(salt, sizeof(salt));
+
+    unsigned char key[KEY_LEN];
+    EVP_PBE_scrypt(password.c_str(), password.size(),
+                   salt, sizeof(salt),
+                   SCRYPT_N, SCRYPT_R, SCRYPT_P,
+                   0,
+                   key, sizeof(key));
+
+    return toHex(salt, SALT_LEN) + "$" + toHex(key, KEY_LEN);
+}
+
+bool verifyPassword(const std::string& password, const std::string& stored)
+{
+    size_t pos = stored.find('$');
+    if (pos == std::string::npos) return false;
+
+    unsigned char salt[SALT_LEN];
+    fromHex(stored.substr(0, pos), salt, SALT_LEN);
+
+    unsigned char expected[KEY_LEN];
+    fromHex(stored.substr(pos + 1), expected, KEY_LEN);
+
+    unsigned char actual[KEY_LEN];
+    EVP_PBE_scrypt(password.c_str(), password.size(),
+                   salt, sizeof(salt),
+                   SCRYPT_N, SCRYPT_R, SCRYPT_P,
+                   0,
+                   actual, sizeof(actual));
+
+    return CRYPTO_memcmp(actual, expected, KEY_LEN) == 0;
 }
 
 } // namespace PasswordUtils

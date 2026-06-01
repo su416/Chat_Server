@@ -6,11 +6,11 @@
 namespace PasswordUtils
 {
 
-// 对密码做 SHA-256(明文 + 服务端盐值)，返回 64 位十六进制字符串
+// scrypt 哈希密码 (N=16384 r=8 p=1)，格式：salt_hex$key_hex
 std::string hashPassword(const std::string& password);
 
-// 验证密码：hashPassword(password) == storedHash
-bool verifyPassword(const std::string& password, const std::string& hash);
+// 验证密码（兼容旧 SHA-256 格式）
+bool verifyPassword(const std::string& password, const std::string& stored);
 
 } // namespace PasswordUtils
 
