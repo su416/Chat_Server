@@ -20,14 +20,24 @@ static std::string toHex(const unsigned char* data, size_t len)
     return oss.str();
 }
 
+static int hexValue(char c) noexcept
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;  // 非法字符
+}
+
 static size_t fromHex(const std::string& hex, unsigned char* out, size_t maxLen)
 {
     size_t n = 0;
     for (size_t i = 0; i + 1 < hex.size() && n < maxLen; i += 2, ++n)
     {
-        unsigned int byte;
-        sscanf(hex.c_str() + i, "%2x", &byte);
-        out[n] = static_cast<unsigned char>(byte);
+        int hi = hexValue(hex[i]);
+        int lo = hexValue(hex[i + 1]);
+        if (hi < 0 || lo < 0)
+            return 0;  // 非法字符 → 校验失败
+        out[n] = static_cast<unsigned char>((hi << 4) | lo);
     }
     return n;
 }

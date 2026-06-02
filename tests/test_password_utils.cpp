@@ -1,4 +1,4 @@
-// 测试模块：PasswordUtils（scrypt 密码哈希）
+                    // 测试模块：PasswordUtils（scrypt 密码哈希）
 // 覆盖：哈希+验证、错误密码、篡改哈希、随机盐特性、哈希长度
 
 #include <gtest/gtest.h>
@@ -21,9 +21,9 @@ TEST(PasswordUtilsTest, TamperedHashFails)
     std::string hash = PasswordUtils::hashPassword("secret");
     // 篡改哈希中间一个字符
     hash[10] = (hash[10] == 'a') ? 'b' : 'a';
-    EXPECT_FALSE(PasswordUtils::verifyPassword("secret", hash));
+      EXPECT_FALSE(PasswordUtils::verifyPassword("secret", hash));
 }
-
+  
 TEST(PasswordUtilsTest, SamePasswordDifferentHashes)
 {
     // scrypt 每次生成随机盐 → 相同密码产生不同哈希
@@ -50,4 +50,21 @@ TEST(PasswordUtilsTest, InvalidFormatReturnsFalse)
 {
     EXPECT_FALSE(PasswordUtils::verifyPassword("x", "no_dollar_sign"));
     EXPECT_FALSE(PasswordUtils::verifyPassword("x", ""));
+}
+
+TEST(PasswordUtilsTest, CorruptedHexSaltRejected)
+{
+    // 把合法哈希的盐替换为非法 hex 字符 "gg"
+    std::string hash = PasswordUtils::hashPassword("test");
+    hash.replace(0, 2, "gg");  // 前 2 字节变成非法字符
+    EXPECT_FALSE(PasswordUtils::verifyPassword("test", hash));
+}
+
+TEST(PasswordUtilsTest, CorruptedHexKeyRejected)
+{
+    // 把合法哈希的密钥替换为非法 hex 字符 "zz"
+    std::string hash = PasswordUtils::hashPassword("test");
+    size_t dollar = hash.find('$');
+    hash.replace(dollar + 1, 2, "zz");
+    EXPECT_FALSE(PasswordUtils::verifyPassword("test", hash));
 }
