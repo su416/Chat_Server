@@ -125,7 +125,8 @@ void ChatService::negotiate(const TcpConnectionPtr &conn, json &js, Timestamp ti
         response["status"] = "unknown_format, fallback to json";
     }
 
-    sendTcpJson(conn, response);
+    // 协商响应始终走 JSON（客户端还没切协议，不能包成 Protobuf）
+    conn->send(JsonCodec::encode(response.dump()));
 }
 
 // 处理登录业务
