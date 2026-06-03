@@ -66,3 +66,16 @@ docs/bench_results/
 
 # personal scripts
 autobuild.sh
+
+# reference projects / documents
+wechat/
+C++ Boost_Asio*.md
+检查结果.txt
+
+# generated Python protobuf bindings
+script/proto_gen/
+__pycache__/
+*.pyc
+
+# temp / test
+test/

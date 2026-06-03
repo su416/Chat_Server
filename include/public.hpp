@@ -6,6 +6,7 @@ server 和 client 的公共文件
 */
 enum EnMsgType
 {
+    NEGOTIATE_MSG = 0,  // 协议协商（客户端声明期望格式，服务端确认）
     LOGIN_MSG = 1,      // 登录消息
     LOGIN_MSG_ACK,      // 登录响应消息
     LOGINOUT_MSG,       // 注销消息

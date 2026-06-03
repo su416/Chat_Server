@@ -3,6 +3,7 @@
 #include "chatservice.hpp"
 #include "server/jsoncodec.hpp"
 #include "protocodec.hpp"
+#include "binary_codec.hpp"
 #include "chat.pb.h"
 
 #include <boost/any.hpp>
@@ -90,7 +91,11 @@ std::string ChatServer::encodeResponse(const TcpConnectionPtr& conn,
     {
         // Protobuf 连接 → 用 Envelope 包装 + ProtoCodec 分帧
         chat::Envelope env;
-        env.set_errcode(0);
+        try {
+            json js = json::parse(jsonBody);
+            env.set_msgid(js.value("msgid", 0));
+            env.set_errcode(js.value("errno", 0));
+        } catch (...) {}
         env.set_payload(jsonBody);
         return ProtoCodec::encode(env.SerializeAsString());
     }
@@ -163,6 +168,24 @@ void ChatServer::onMessage(const TcpConnectionPtr &conn,
             {
                 LOG_ERROR << "invalid json frame: " << e.what()
                           << " frame=" << frame;
+            }
+        }
+        else if (static_cast<unsigned char>(firstByte) == 0xFF)
+        {
+            // ──── Binary 协议路径（0xFF 标记头） ────
+            int msgId;
+            if (!BinaryCodec::tryExtractFrame(buffer, msgId, frame))
+                break;
+
+            try
+            {
+                json js = json::parse(frame);
+                auto msgHandler = ChatService::instance()->getHandler(msgId);
+                msgHandler(conn, js, time);
+            }
+            catch (const std::exception &e)
+            {
+                LOG_ERROR << "binary frame parse error: " << e.what();
             }
         }
         else

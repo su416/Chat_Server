@@ -37,6 +37,9 @@ ChatService *ChatService::instance()
 // 注册消息以及对应的Handler回调操作
 ChatService::ChatService()
 {
+    // 协议协商（msgid=0）——客户端声明偏好，服务端确认
+    _msgHandlerMap.insert({NEGOTIATE_MSG, std::bind(&ChatService::negotiate, this, _1, _2, _3)});
+
     // 用户基本业务管理相关事件处理回调注册
     _msgHandlerMap.insert({LOGIN_MSG, std::bind(&ChatService::login, this, _1, _2, _3)});
     _msgHandlerMap.insert({LOGINOUT_MSG, std::bind(&ChatService::loginout, this, _1, _2, _3)});
@@ -93,6 +96,36 @@ MsgHandler ChatService::getHandler(int msgid)
     {
         return _msgHandlerMap[msgid];
     }
+}
+
+// 协议协商 msgid=0
+void ChatService::negotiate(const TcpConnectionPtr &conn, json &js, Timestamp time)
+{
+    string accept = js.value("accept", "json");
+    json response;
+    response["msgid"] = 0;
+
+    if (accept == "protobuf")
+    {
+        conn->setContext(ConnProtocol::PROTO_PROTOBUF);
+        response["content_type"] = "protobuf";
+        response["status"] = "ok";
+    }
+    else if (accept == "json")
+    {
+        conn->setContext(ConnProtocol::PROTO_JSON);
+        response["content_type"] = "json";
+        response["status"] = "ok";
+    }
+    else
+    {
+        // 不认识的格式，保持默认 JSON
+        conn->setContext(ConnProtocol::PROTO_JSON);
+        response["content_type"] = "json";
+        response["status"] = "unknown_format, fallback to json";
+    }
+
+    sendTcpJson(conn, response);
 }
 
 // 处理登录业务

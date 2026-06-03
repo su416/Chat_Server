@@ -4,14 +4,23 @@
 #include <hiredis/hiredis.h>
 #include <thread>
 #include <functional>
+#include <memory>
 #include <mutex>
 using namespace std;
+
+// hiredis context 自动释放器
+struct RedisContextDeleter {
+    void operator()(redisContext* ctx) const {
+        if (ctx) redisFree(ctx);
+    }
+};
+using RedisContextPtr = unique_ptr<redisContext, RedisContextDeleter>;
 
 class Redis
 {
 public:
     Redis();
-    ~Redis();
+    ~Redis() = default;  // unique_ptr 自动释放
 
     // 连接redis服务器
     bool connect();
@@ -41,11 +50,11 @@ private:
     // 重新连接两个上下文
     bool reconnect();
 
-    // hiredis同步上下文对象，负责publish消息
-    redisContext *_publish_context;
+    // hiredis同步上下文对象，负责publish消息（unique_ptr 自动释放）
+    RedisContextPtr _publish_context;
 
-    // hiredis同步上下文对象，负责subscribe消息
-    redisContext *_subcribe_context;
+    // hiredis同步上下文对象，负责subscribe消息（unique_ptr 自动释放）
+    RedisContextPtr _subcribe_context;
 
     // 保护 _subcribe_context 的并发访问（observer 线程 + Muduo 线程）
     mutex _subscribeMutex;

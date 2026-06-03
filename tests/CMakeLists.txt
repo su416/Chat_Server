@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.16)
 set(CMAKE_AUTOMOC ON)
 
-# Google Test — 系统安装版（sudo apt install libgtest-dev libgmock-dev）
+# Google Test — 
 find_package(GTest REQUIRED)
 
 include_directories(

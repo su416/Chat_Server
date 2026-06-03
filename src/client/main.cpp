@@ -7,6 +7,7 @@
 #include <ctime>
 #include <unordered_map>
 #include <functional>
+#include <cstring>
 using namespace std;
 using json = nlohmann::json;
 
@@ -21,21 +22,93 @@ using json = nlohmann::json;
 #include "group.hpp"
 #include "user.hpp"
 #include "public.hpp"
+#include "chat.pb.h"
 
 // 记录当前系统登录的用户信息
 User g_currentUser;
 // 记录当前登录用户的好友列表信息
 vector<User> g_currentUserFriendList;
-// .                                                         记录当前登录用户的群组列表信息
+// 记录当前登录用户的群组列表信息
 vector<Group> g_currentUserGroupList;
 
 // 控制主菜单页面程序
-bool isMainMenuRunning = false;        
+bool isMainMenuRunning = false;
 
 // 用于读写线程之间的通信
 sem_t rwsem;
 // 记录登录状态
 atomic_bool g_isLoginSuccess{false};
+
+// Protobuf 协议开关（--proto 参数启用）
+bool g_useProto = false;
+
+// ──── Protobuf 协议辅助函数 ────
+
+// 发送 Protobuf 帧：[4B BE len][Envelope bytes]
+static void sendProto(int fd, const chat::Envelope& env)
+{
+    string data = env.SerializeAsString();
+    uint32_t netLen = htonl(static_cast<uint32_t>(data.size()));
+    send(fd, &netLen, 4, 0);
+    send(fd, data.c_str(), data.size(), 0);
+}
+
+// 接收一帧 Protobuf 数据，返回 JSON 字面量（桥接模式下 payload 是 JSON）
+static string recvProto(int fd)
+{
+    uint32_t netLen = 0;
+    int n = recv(fd, &netLen, 4, MSG_WAITALL);
+    if (n != 4) return "{}";
+    uint32_t len = ntohl(netLen);
+    if (len == 0 || len > 65536) return "{}";
+
+    vector<char> buf(len);
+    n = recv(fd, buf.data(), len, MSG_WAITALL);
+    if (n <= 0) return "{}";
+
+    chat::Envelope env;
+    if (!env.ParseFromArray(buf.data(), static_cast<int>(len)))
+        return "{}";
+
+    // 桥接模式：payload 是 JSON 字符串
+    if (!env.payload().empty())
+        return env.payload();
+
+    return "{}";
+}
+
+// 协议协商：发 msgid=0 请求切换到 Protobuf
+static void negotiateProto(int fd)
+{
+    string js = R"({"msgid":0,"accept":"protobuf"})";
+    string frame = js + '\0';
+    send(fd, frame.c_str(), frame.size(), 0);
+
+    // 读回协商响应（JSON）
+    char recvBuf[1024] = {0};
+    recv(fd, recvBuf, sizeof(recvBuf), 0);
+}
+
+// 通用发送：根据 g_useProto 选择格式，返回 send() 的返回值
+static ssize_t sendMsgWrap(int fd, const json& js)
+{
+    if (!g_useProto)
+    {
+        string body = js.dump();
+        string frame = body + '\0';
+        return send(fd, frame.c_str(), frame.size(), 0);
+    }
+    else
+    {
+        chat::Envelope env;
+        env.set_msgid(js["msgid"].get<int>());
+        env.set_payload(js.dump());
+        string data = env.SerializeAsString();
+        uint32_t netLen = htonl(static_cast<uint32_t>(data.size()));
+        if (send(fd, &netLen, 4, 0) != 4) return -1;
+        return send(fd, data.c_str(), data.size(), 0);
+    }
+}
 
 
 // 接收线程
@@ -52,12 +125,16 @@ int main(int argc, char **argv)
 {
     if (argc < 3)
     {
-        cerr << "command invalid! example: ./ChatClient 127.0.0.1 6000" << endl;
+        cerr << "command invalid! example: ./ChatClient 127.0.0.1 6000 [--proto]" << endl;
         exit(-1);
     }
 
-    // 解析通过命令行参数传递的ip和port
+    // 解析 --proto 参数
     char *ip = argv[1];
+    if (argc >= 4 && string(argv[3]) == "--proto")
+    {
+        g_useProto = true;
+    }
     uint16_t port = atoi(argv[2]);
 
     // 创建client端的socket
@@ -86,6 +163,12 @@ int main(int argc, char **argv)
 
     // 初始化读写线程通信用的信号量
     sem_init(&rwsem, 0, 0);
+
+    // Protobuf 模式：先协商
+    if (g_useProto)
+    {
+        negotiateProto(clientfd);
+    }
 
     // 连接服务器成功，启动接收子线程
     std::thread readTask(readTaskHandler, clientfd); // pthread_create
@@ -121,14 +204,12 @@ int main(int argc, char **argv)
             js["msgid"] = LOGIN_MSG;
             js["id"] = id;
             js["password"] = pwd;
-            string request = js.dump();
-
             g_isLoginSuccess = false;
 
-            int len = send(clientfd, request.c_str(), strlen(request.c_str()) + 1, 0);
+            int len = sendMsgWrap(clientfd, js);
             if (len == -1)
             {
-                cerr << "send login msg error:" << request << endl;
+                cerr << "send login msg error" << endl;
             }
 
             sem_wait(&rwsem); // 等待信号量，由子线程处理完登录的响应消息后，通知这里
@@ -154,12 +235,11 @@ int main(int argc, char **argv)
             js["msgid"] = REG_MSG;
             js["name"] = name;
             js["password"] = pwd;
-            string request = js.dump();
 
-            int len = send(clientfd, request.c_str(), strlen(request.c_str()) + 1, 0);
+            int len = sendMsgWrap(clientfd, js);
             if (len == -1)
             {
-                cerr << "send reg msg error:" << request << endl;
+                cerr << "send reg msg error" << endl;
             }
             
             sem_wait(&rwsem); // 等待信号量，子线程处理完注册消息会通知
@@ -288,16 +368,30 @@ void readTaskHandler(int clientfd)
 {
     for (;;)
     {
-        char buffer[1024] = {0};
-        int len = recv(clientfd, buffer, 1024, 0);  // 阻塞了
-        if (-1 == len || 0 == len)
+        string payload;
+        if (!g_useProto)
         {
-            close(clientfd);
-            exit(-1);
+            char buffer[1024] = {0};
+            int len = recv(clientfd, buffer, 1024, 0);
+            if (-1 == len || 0 == len)
+            {
+                close(clientfd);
+                exit(-1);
+            }
+            payload = buffer;
+        }
+        else
+        {
+            payload = recvProto(clientfd);
+            if (payload.empty() || payload == "{}")
+            {
+                // 可能收到空包或无效帧，跳过
+                continue;
+            }
         }
 
-        // 接收ChatServer转发的数据，反序列化生成json数据对象
-        json js = json::parse(buffer);
+        // 反序列化生成json数据对象
+        json js = json::parse(payload);
         int msgtype = js["msgid"].get<int>();
         if (ONE_CHAT_MSG == msgtype)
         {
@@ -500,12 +594,10 @@ void addfriend(int clientfd, string str)
     js["msgid"] = ADD_FRIEND_MSG;
     js["id"] = g_currentUser.getId();
     js["friendid"] = friendid;
-    string buffer = js.dump();
-
-    int len = send(clientfd, buffer.c_str(), strlen(buffer.c_str()) + 1, 0);
+    int len = sendMsgWrap(clientfd, js);
     if (-1 == len)
     {
-        cerr << "send addfriend msg error -> " << buffer << endl;
+        cerr << "send addfriend msg error" << endl;
     }
 }
 // "chat" command handler
@@ -528,12 +620,10 @@ void chat(int clientfd, string str)
     js["toid"] = friendid;
     js["msg"] = message;
     js["time"] = getCurrentTime();
-    string buffer = js.dump();
-
-    int len = send(clientfd, buffer.c_str(), strlen(buffer.c_str()) + 1, 0);
+    int len = sendMsgWrap(clientfd, js);
     if (-1 == len)
     {
-        cerr << "send chat msg error -> " << buffer << endl;
+        cerr << "send chat msg error" << endl;
     }
 }
 // "creategroup" command handler  groupname:groupdesc
@@ -554,12 +644,10 @@ void creategroup(int clientfd, string str)
     js["id"] = g_currentUser.getId();
     js["groupname"] = groupname;
     js["groupdesc"] = groupdesc;
-    string buffer = js.dump();
-
-    int len = send(clientfd, buffer.c_str(), strlen(buffer.c_str()) + 1, 0);
+    int len = sendMsgWrap(clientfd, js);
     if (-1 == len)
     {
-        cerr << "send creategroup msg error -> " << buffer << endl;
+        cerr << "send creategroup msg error" << endl;
     }
 }
 // "addgroup" command handler
@@ -570,12 +658,10 @@ void addgroup(int clientfd, string str)
     js["msgid"] = ADD_GROUP_MSG;
     js["id"] = g_currentUser.getId();
     js["groupid"] = groupid;
-    string buffer = js.dump();
-
-    int len = send(clientfd, buffer.c_str(), strlen(buffer.c_str()) + 1, 0);
+    int len = sendMsgWrap(clientfd, js);
     if (-1 == len)
     {
-        cerr << "send addgroup msg error -> " << buffer << endl;
+        cerr << "send addgroup msg error" << endl;
     }
 }
 // "groupchat" command handler   groupid:message
@@ -598,12 +684,10 @@ void groupchat(int clientfd, string str)
     js["groupid"] = groupid;
     js["msg"] = message;
     js["time"] = getCurrentTime();
-    string buffer = js.dump();
-
-    int len = send(clientfd, buffer.c_str(), strlen(buffer.c_str()) + 1, 0);
+    int len = sendMsgWrap(clientfd, js);
     if (-1 == len)
     {
-        cerr << "send groupchat msg error -> " << buffer << endl;
+        cerr << "send groupchat msg error" << endl;
     }
 }
 // "loginout" command handler
@@ -612,12 +696,10 @@ void loginout(int clientfd, string)
     json js;
     js["msgid"] = LOGINOUT_MSG;
     js["id"] = g_currentUser.getId();
-    string buffer = js.dump();
-
-    int len = send(clientfd, buffer.c_str(), strlen(buffer.c_str()) + 1, 0);
+    int len = sendMsgWrap(clientfd, js);
     if (-1 == len)
     {
-        cerr << "send loginout msg error -> " << buffer << endl;
+        cerr << "send loginout msg error" << endl;
     }
     else
     {
@@ -640,12 +722,10 @@ void history(int clientfd, string str)
     js["msgid"] = QUERY_ONE_CHAT_HISTORY_MSG;
     js["id"] = g_currentUser.getId();
     js["limit"] = limit;
-    string buffer = js.dump();
-
-    int len = send(clientfd, buffer.c_str(), strlen(buffer.c_str()) + 1, 0);
+    int len = sendMsgWrap(clientfd, js);
     if (-1 == len)
     {
-        cerr << "send history msg error -> " << buffer << endl;
+        cerr << "send history msg error" << endl;
     }
 }
 
@@ -672,12 +752,10 @@ void grouphistory(int clientfd, string str)
     js["msgid"] = QUERY_GROUP_CHAT_HISTORY_MSG;
     js["groupid"] = groupid;
     js["limit"] = limit;
-    string buffer = js.dump();
-
-    int len = send(clientfd, buffer.c_str(), strlen(buffer.c_str()) + 1, 0);
+    int len = sendMsgWrap(clientfd, js);
     if (-1 == len)
     {
-        cerr << "send grouphistory msg error -> " << buffer << endl;
+        cerr << "send grouphistory msg error" << endl;
     }
 }
 

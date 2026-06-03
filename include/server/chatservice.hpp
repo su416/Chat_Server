@@ -28,6 +28,8 @@ class ChatService
 public:
     // 获取单例对象的接口函数
     static ChatService *instance();
+    // 协议协商（客户端声明偏好，服务端确认并存储到 conn context）
+    void negotiate(const TcpConnectionPtr &conn, json &js, Timestamp time);
     // 处理登录业务
     void login(const TcpConnectionPtr &conn, json &js, Timestamp time);
     // 处理注册业务

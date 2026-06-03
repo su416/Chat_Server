@@ -7,21 +7,7 @@
 using namespace std;
 
 Redis::Redis()
-    : _publish_context(nullptr), _subcribe_context(nullptr)
 {
-}
-
-Redis::~Redis()
-{
-    if (_publish_context != nullptr)
-    {
-        redisFree(_publish_context);
-    }
-
-    if (_subcribe_context != nullptr)
-    {
-        redisFree(_subcribe_context);
-    }
 }
 
 
@@ -32,16 +18,16 @@ bool Redis::connect()
     uint16_t port = Config::instance().getRedisPort();
 
     // 负责 publish 发布消息的上下文连接
-    _publish_context = redisConnect(host.c_str(), port);
-    if (nullptr == _publish_context)
+    _publish_context.reset(redisConnect(host.c_str(), port));
+    if (!_publish_context)
     {
         LOG_ERROR << "connect redis failed! host=" << host << " port=" << port;
         return false;
     }
 
     // 负责 subscribe 订阅消息的上下文连接
-    _subcribe_context = redisConnect(host.c_str(), port);
-    if (nullptr == _subcribe_context)
+    _subcribe_context.reset(redisConnect(host.c_str(), port));
+    if (!_subcribe_context)
     {
         LOG_ERROR << "connect redis failed! host=" << host << " port=" << port;
         return false;
@@ -61,7 +47,7 @@ bool Redis::connect()
 // 检查 Redis 连接状态
 bool Redis::isConnected() const
 {
-    return _publish_context != nullptr && _publish_context->err == REDIS_OK;
+    return _publish_context && _publish_context->err == REDIS_OK;
 }
 
 // 向redis指定的通道channel发布消息
@@ -73,7 +59,7 @@ bool Redis::publish(int channel, string message)
         return false;
     }
 
-    redisReply *reply = (redisReply *)redisCommand(_publish_context, "PUBLISH %d %s", channel, message.c_str());
+    redisReply *reply = (redisReply *)redisCommand(_publish_context.get(), "PUBLISH %d %s", channel, message.c_str());
     if (nullptr == reply)
     {
         LOG_ERROR << "publish command failed!";
@@ -88,13 +74,13 @@ bool Redis::subscribe(int channel)
 {
     lock_guard<mutex> lock(_subscribeMutex);
 
-    if (_subcribe_context == nullptr)
+    if (!_subcribe_context)
     {
         LOG_ERROR << "redis subscribe skipped: not connected";
         return false;
     }
 
-    if (REDIS_ERR == redisAppendCommand(this->_subcribe_context, "SUBSCRIBE %d", channel))
+    if (REDIS_ERR == redisAppendCommand(this->_subcribe_context.get(), "SUBSCRIBE %d", channel))
     {
         LOG_ERROR << "subscribe command failed!";
         return false;
@@ -102,7 +88,7 @@ bool Redis::subscribe(int channel)
     int done = 0;
     while (!done)
     {
-        if (REDIS_ERR == redisBufferWrite(this->_subcribe_context, &done))
+        if (REDIS_ERR == redisBufferWrite(this->_subcribe_context.get(), &done))
         {
             LOG_ERROR << "subscribe command failed!";
             return false;
@@ -116,12 +102,12 @@ bool Redis::unsubscribe(int channel)
 {
     lock_guard<mutex> lock(_subscribeMutex);
 
-    if (_subcribe_context == nullptr)
+    if (!_subcribe_context)
     {
         return false;
     }
 
-    if (REDIS_ERR == redisAppendCommand(this->_subcribe_context, "UNSUBSCRIBE %d", channel))
+    if (REDIS_ERR == redisAppendCommand(this->_subcribe_context.get(), "UNSUBSCRIBE %d", channel))
     {
         LOG_ERROR << "unsubscribe command failed!";
         return false;
@@ -129,7 +115,7 @@ bool Redis::unsubscribe(int channel)
     int done = 0;
     while (!done)
     {
-        if (REDIS_ERR == redisBufferWrite(this->_subcribe_context, &done))
+        if (REDIS_ERR == redisBufferWrite(this->_subcribe_context.get(), &done))
         {
             LOG_ERROR << "unsubscribe command failed!";
             return false;
@@ -144,8 +130,8 @@ void Redis::observer_channel_message()
     while (true)
     {
         redisReply *reply = nullptr;
-        while (_subcribe_context != nullptr &&
-               REDIS_OK == redisGetReply(this->_subcribe_context, (void **)&reply))
+        while (_subcribe_context &&
+               REDIS_OK == redisGetReply(this->_subcribe_context.get(), (void **)&reply))
         {
             if (reply != nullptr
                 && reply->type == REDIS_REPLY_ARRAY
@@ -183,25 +169,17 @@ bool Redis::reconnect()
     string host = Config::instance().getRedisHost();
     uint16_t port = Config::instance().getRedisPort();
 
-    // 释放旧连接
-    if (_subcribe_context)
-    {
-        redisFree(_subcribe_context);
-        _subcribe_context = nullptr;
-    }
-    if (_publish_context)
-    {
-        redisFree(_publish_context);
-        _publish_context = nullptr;
-    }
+    // 释放旧连接（unique_ptr::reset 自动调 RedisContextDeleter）
+    _subcribe_context.reset();
+    _publish_context.reset();
 
     // 重建两个上下文
-    _publish_context = redisConnect(host.c_str(), port);
-    if (_publish_context == nullptr || _publish_context->err)
+    _publish_context.reset(redisConnect(host.c_str(), port));
+    if (!_publish_context || _publish_context->err)
         return false;
 
-    _subcribe_context = redisConnect(host.c_str(), port);
-    if (_subcribe_context == nullptr || _subcribe_context->err)
+    _subcribe_context.reset(redisConnect(host.c_str(), port));
+    if (!_subcribe_context || _subcribe_context->err)
         return false;
 
     return true;
