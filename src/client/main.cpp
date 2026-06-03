@@ -504,7 +504,7 @@ void showCurrentUserData()
 // "help" command handler
 void help(int fd = 0, string str = "");
 // "chat" command handler
-void chat(int, string);
+void chatCmd(int, string);
 // "addfriend" command handler
 void addfriend(int, string);
 // "creategroup" command handler
@@ -535,7 +535,7 @@ unordered_map<string, string> commandMap = {
 // 注册系统支持的客户端命令处理
 unordered_map<string, function<void(int, string)>> commandHandlerMap = {
     {"help", help},
-    {"chat", chat},
+    {"chat", chatCmd},
     {"addfriend", addfriend},
     {"creategroup", creategroup},
     {"addgroup", addgroup},
@@ -601,7 +601,7 @@ void addfriend(int clientfd, string str)
     }
 }
 // "chat" command handler
-void chat(int clientfd, string str)
+void chatCmd(int clientfd, string str)
 {
     int idx = str.find(":"); // friendid:message
     if (-1 == idx)
