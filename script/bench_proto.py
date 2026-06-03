@@ -169,8 +169,8 @@ def run_online_to_online_pb(concurrency, messages_per_pair):
 
     pairs = []
     for i in range(concurrency):
-        sid, _, spwd = proto_register(f"{RUN_ID}_oto", f"s{i}")
-        rid, _, rpwd = proto_register(f"{RUN_ID}_oto", f"r{i}")
+        sid, _, spwd = proto_register(f"{RUN_ID}_c{concurrency}_oto", f"s{i}")
+        rid, _, rpwd = proto_register(f"{RUN_ID}_c{concurrency}_oto", f"r{i}")
         if sid < 0 or rid < 0:
             raise RuntimeError(f"registration failed at pair {i}")
         pairs.append(((sid, spwd), (rid, rpwd)))
