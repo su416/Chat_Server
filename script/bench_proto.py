@@ -142,7 +142,6 @@ def _pb_receiver(pair_idx, user_id, password, expected_msgs,
     sock = None
     try:
         sock = socket.create_connection((HOST, PORT), timeout=CONNECT_TIMEOUT)
-        negotiate_protobuf(sock)
         proto_login(sock, user_id, password)
         ready_event.set()
 
@@ -199,7 +198,6 @@ def run_online_to_online_pb(concurrency, messages_per_pair):
         sock = None
         try:
             sock = socket.create_connection((HOST, PORT), timeout=CONNECT_TIMEOUT)
-            negotiate_protobuf(sock)
             proto_login(sock, sid, spwd)
             for j in range(messages_per_pair):
                 send_stamps[i].append(time.perf_counter())
