@@ -41,7 +41,8 @@ void ChatHistoryModel::insertOneChat(int fromid, int toid, const string& msg,
     bind[4].buffer = extra.empty() ? nullptr : const_cast<char*>(extra.c_str());
     bind[4].buffer_length = extraLen;
     bind[4].length = &extraLen;
-    bind[4].is_null = extra.empty() ? (my_bool*)1 : nullptr;
+    static bool nullFlag = true;
+    bind[4].is_null = extra.empty() ? &nullFlag : nullptr;
 
     mysql->executePrepared(sql, bind, 5);
 }
@@ -80,7 +81,8 @@ void ChatHistoryModel::insertGroupChat(int fromid, int groupid, const string& ms
     bind[4].buffer = extra.empty() ? nullptr : const_cast<char*>(extra.c_str());
     bind[4].buffer_length = extraLen;
     bind[4].length = &extraLen;
-    bind[4].is_null = extra.empty() ? (my_bool*)1 : nullptr;
+    static bool nullFlag = true;
+    bind[4].is_null = extra.empty() ? &nullFlag : nullptr;
 
     mysql->executePrepared(sql, bind, 5);
 }
