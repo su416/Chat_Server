@@ -194,3 +194,52 @@ void Redis::setReconnectHandler(function<void()> fn)
 {
     _onReconnect = std::move(fn);
 }
+
+bool Redis::registerServer(const string& name, const string& host, int port)
+{
+    if (!isConnected()) return false;
+
+    string json = "{\"host\":\"" + host + "\",\"port\":" + to_string(port)
+                + ",\"connections\":0,\"updated_at\":\"" +
+                to_string(time(nullptr)) + "\"}";
+
+    auto* reply = (redisReply*)redisCommand(_publish_context.get(),
+        "HSET chatservers %s %s", name.c_str(), json.c_str());
+    if (!reply) return false;
+    freeReplyObject(reply);
+    return true;
+}
+
+bool Redis::updateConnections(const string& name, int count)
+{
+    if (!isConnected()) return false;
+
+    // 先读当前 JSON，更新 connections 字段，再写回
+    auto* reply = (redisReply*)redisCommand(_publish_context.get(),
+        "HGET chatservers %s", name.c_str());
+    if (!reply || reply->type != REDIS_REPLY_STRING) {
+        if (reply) freeReplyObject(reply);
+        return false;
+    }
+
+    string json(reply->str);
+    freeReplyObject(reply);
+
+    // 简单字符串替换：更新 connections 和 updated_at
+    auto updateField = [](string& s, const string& key, const string& val) {
+        auto pos = s.find("\"" + key + "\":");
+        if (pos == string::npos) return;
+        auto start = s.find_first_of("0123456789", pos + key.size() + 3);
+        auto end = s.find_first_not_of("0123456789", start);
+        if (start != string::npos && end != string::npos)
+            s.replace(start, end - start, val);
+    };
+    updateField(json, "connections", to_string(count));
+    updateField(json, "updated_at", to_string(time(nullptr)));
+
+    reply = (redisReply*)redisCommand(_publish_context.get(),
+        "HSET chatservers %s %s", name.c_str(), json.c_str());
+    if (!reply) return false;
+    freeReplyObject(reply);
+    return true;
+}

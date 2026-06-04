@@ -5,6 +5,62 @@
 #include <QJsonArray>
 #include <QJsonParseError>
 #include <QDebug>
+#include <arpa/inet.h>
+
+// ──── Protobuf Envelope 手动构造（不依赖 protobuf 库）────
+
+static QByteArray protoVarint(quint64 val)
+{
+    QByteArray out;
+    while (val > 127) {
+        out.append(static_cast<char>((val & 0x7F) | 0x80));
+        val >>= 7;
+    }
+    out.append(static_cast<char>(val));
+    return out;
+}
+
+static QByteArray buildEnvelope(int msgid, const QByteArray& payload)
+{
+    // Envelope { msgid: field1(varint), payload: field2(bytes) }
+    QByteArray env;
+    // field 1, wire type 0 → tag = (1 << 3) | 0 = 0x08
+    env.append('\x08');
+    env.append(protoVarint(msgid));
+    // field 2, wire type 2 → tag = (2 << 3) | 2 = 0x12
+    env.append('\x12');
+    env.append(protoVarint(payload.size()));
+    env.append(payload);
+    return env;
+}
+
+// 发送 Protobuf 帧：[4B BE len][Envelope bytes]
+void ChatClient::sendProtoFrame(int msgid, const QByteArray& payload)
+{
+    QByteArray env = buildEnvelope(msgid, payload);
+    quint32 netLen = htonl(static_cast<quint32>(env.size()));
+    QByteArray frame;
+    frame.append(reinterpret_cast<const char*>(&netLen), 4);
+    frame.append(env);
+    m_socket->write(frame);
+}
+
+// 协议协商：发 JSON msgid=0 切换到 Protobuf
+void ChatClient::negotiateProto()
+{
+    QJsonObject req;
+    req["msgid"] = 0;
+    req["accept"] = "protobuf";
+    QByteArray data = QJsonDocument(req).toJson(QJsonDocument::Compact);
+    data.append('\0');
+    m_socket->write(data);
+    // 协商响应由 onReadyRead 按 JSON 帧处理（协商响应固定走 JSON）
+}
+
+void ChatClient::setUseProtobuf(bool enabled)
+{
+    m_useProtobuf = enabled;
+}
 
 ChatClient::ChatClient(QObject *parent)
     : QObject(parent),
@@ -46,13 +102,18 @@ void ChatClient::disconnectFromServer()
 
 void ChatClient::sendJson(const QJsonObject &obj)
 {
-    QByteArray data = QJsonDocument(obj).toJson(QJsonDocument::Compact);
-    data.append('\0');
-
-    qint64 len = m_socket->write(data);
-    if (len == -1)
+    if (m_useProtobuf)
     {
-        emit networkError("failed to send data");
+        int msgid = obj.value("msgid").toInt();
+        QByteArray payload = QJsonDocument(obj).toJson(QJsonDocument::Compact);
+        sendProtoFrame(msgid, payload);
+    }
+    else
+    {
+        QByteArray data = QJsonDocument(obj).toJson(QJsonDocument::Compact);
+        data.append('\0');
+        if (m_socket->write(data) == -1)
+            emit networkError("failed to send data");
     }
 }
 
@@ -61,6 +122,10 @@ void ChatClient::sendJson(const QJsonObject &obj)
 void ChatClient::onConnected()
 {
     m_recvBuf.clear();
+
+    if (m_useProtobuf)
+        negotiateProto();
+
     emit connected();
 }
 
@@ -88,32 +153,73 @@ void ChatClient::onDisconnected()
 
 void ChatClient::onReadyRead()
 {
-    // 追加到缓冲区
     m_recvBuf.append(m_socket->readAll());
 
-    // 按 \0 分隔符逐帧解析
-    while (true)
+    if (m_useProtobuf)
     {
-        int idx = m_recvBuf.indexOf('\0');
-        if (idx == -1)
-            break;  // 没有完整帧，等待下次数据到达
-
-        QByteArray frame = m_recvBuf.left(idx);
-        m_recvBuf.remove(0, idx + 1);
-
-        if (frame.isEmpty())
-            continue;
-
-        QJsonParseError error;
-        QJsonDocument doc = QJsonDocument::fromJson(frame, &error);
-        if (error.error != QJsonParseError::NoError || !doc.isObject())
+        // Protobuf 路径：[4B BE len][Envelope bytes]
+        while (m_recvBuf.size() >= 4)
         {
-            qDebug() << "invalid json frame:" << error.errorString()
-                     << "data:" << frame.left(80);
-            continue;
-        }
+            quint32 netLen;
+            memcpy(&netLen, m_recvBuf.constData(), 4);
+            quint32 len = ntohl(netLen);
+            if (static_cast<quint32>(m_recvBuf.size()) < 4 + len)
+                break;  // 不完整帧
 
-        dispatchMessage(doc.object());
+            QByteArray envData = m_recvBuf.mid(4, static_cast<int>(len));
+            m_recvBuf.remove(0, 4 + len);
+
+            // 解析 Envelope：跳过 msgid varint + payload tag
+            if (envData.isEmpty() || static_cast<unsigned char>(envData[0]) != 0x08)
+                continue;
+            int pos = 1;
+            while (pos < envData.size() && (static_cast<unsigned char>(envData[pos]) & 0x80))
+                ++pos;
+            ++pos; // 跳过 msgid varint
+
+            // field 2 tag = 0x12
+            if (pos >= envData.size() || static_cast<unsigned char>(envData[pos]) != 0x12)
+                continue;
+            ++pos;
+
+            // payload length (varint)
+            quint64 payloadLen = 0;
+            int shift = 0;
+            while (pos < envData.size()) {
+                unsigned char b = envData[pos++];
+                payloadLen |= (b & 0x7FULL) << shift;
+                if (!(b & 0x80)) break;
+                shift += 7;
+            }
+
+            QByteArray payload = envData.mid(pos, static_cast<int>(payloadLen));
+            QJsonParseError error;
+            QJsonDocument doc = QJsonDocument::fromJson(payload, &error);
+            if (error.error == QJsonParseError::NoError && doc.isObject())
+                dispatchMessage(doc.object());
+        }
+    }
+    else
+    {
+        // JSON 路径：\0 分帧
+        while (true)
+        {
+            int idx = m_recvBuf.indexOf('\0');
+            if (idx == -1) break;
+
+            QByteArray frame = m_recvBuf.left(idx);
+            m_recvBuf.remove(0, idx + 1);
+            if (frame.isEmpty()) continue;
+
+            QJsonParseError error;
+            QJsonDocument doc = QJsonDocument::fromJson(frame, &error);
+            if (error.error != QJsonParseError::NoError || !doc.isObject())
+            {
+                qDebug() << "invalid json frame:" << error.errorString();
+                continue;
+            }
+            dispatchMessage(doc.object());
+        }
     }
 }
 

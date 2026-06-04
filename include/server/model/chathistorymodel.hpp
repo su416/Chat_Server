@@ -9,13 +9,13 @@ using namespace std;
 class ChatHistoryModel
 {
 public:
-    // 存储单聊消息（status: 0=已送达, 2=离线待投递）
+    // 存储单聊消息（extra: 发送者昵称等扩展信息 JSON）
     void insertOneChat(int fromid, int toid, const string& msg,
-                       int status = 0);
+                       int status = 0, const string& extra = "");
 
     // 存储群聊消息
     void insertGroupChat(int fromid, int groupid, const string& msg,
-                         int status = 0);
+                         int status = 0, const string& extra = "");
 
     // 查询某个用户最近的单聊历史消息
     vector<string> queryRecentOneChat(int userid, int limit);

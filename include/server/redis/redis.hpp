@@ -46,6 +46,11 @@ public:
     // 设置重连后回调（observer 重连成功后触发，用于批量恢复订阅）
     void setReconnectHandler(function<void()> fn);
 
+    // 服务发现：注册 ChatServer 实例到 Redis
+    bool registerServer(const string& name, const string& host, int port);
+    // 更新当前连接数
+    bool updateConnections(const string& name, int count);
+
 private:
     // 重新连接两个上下文
     bool reconnect();

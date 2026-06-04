@@ -28,6 +28,8 @@ class ChatService
 public:
     // 获取单例对象的接口函数
     static ChatService *instance();
+    // 获取 Redis 实例（供 main 注册服务器）
+    Redis* getRedis() { return &_redis; }
     // 协议协商（客户端声明偏好，服务端确认并存储到 conn context）
     void negotiate(const TcpConnectionPtr &conn, json &js, Timestamp time);
     // 处理登录业务
@@ -54,6 +56,9 @@ public:
     MsgHandler getHandler(int msgid);
     // 从 redis 消息队列中获取订阅的消息
     void handleRedisSubscribeMessage(int, string);
+
+    // 同步连接数到 Redis（供负载均衡）
+    void syncServerConnections();
 
     // 查询最近单聊历史消息
     void queryOneChatHistory(const TcpConnectionPtr &conn, json &js, Timestamp time);

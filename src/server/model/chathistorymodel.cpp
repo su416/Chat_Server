@@ -9,16 +9,18 @@ using json = nlohmann::json;
 
 // 存储单聊消息（status: 0=已送达, 2=离线待投递）
 void ChatHistoryModel::insertOneChat(int fromid, int toid, const string& msg,
-                                     int status)
+                                     int status, const string& extra)
 {
     auto mysql = ConnectionPool::instance()->getConnection();
 
     const string sql =
-        "insert into chatmessage(fromid, toid, groupid, msg, status) values(?, ?, null, ?, ?)";
+        "insert into chatmessage(fromid, toid, groupid, msg, status, extra) "
+        "values(?, ?, null, ?, ?, ?)";
 
-    unsigned long msgLength = static_cast<unsigned long>(msg.size());
+    unsigned long msgLen = static_cast<unsigned long>(msg.size());
+    unsigned long extraLen = static_cast<unsigned long>(extra.size());
 
-    MYSQL_BIND bind[4];
+    MYSQL_BIND bind[5];
     memset(bind, 0, sizeof(bind));
 
     bind[0].buffer_type = MYSQL_TYPE_LONG;
@@ -29,27 +31,35 @@ void ChatHistoryModel::insertOneChat(int fromid, int toid, const string& msg,
 
     bind[2].buffer_type = MYSQL_TYPE_STRING;
     bind[2].buffer = const_cast<char*>(msg.c_str());
-    bind[2].buffer_length = msgLength;
-    bind[2].length = &msgLength;
+    bind[2].buffer_length = msgLen;
+    bind[2].length = &msgLen;
 
     bind[3].buffer_type = MYSQL_TYPE_TINY;
     bind[3].buffer = reinterpret_cast<char*>(&status);
 
-    mysql->executePrepared(sql, bind, 4);
+    bind[4].buffer_type = MYSQL_TYPE_STRING;
+    bind[4].buffer = extra.empty() ? nullptr : const_cast<char*>(extra.c_str());
+    bind[4].buffer_length = extraLen;
+    bind[4].length = &extraLen;
+    bind[4].is_null = extra.empty() ? (my_bool*)1 : nullptr;
+
+    mysql->executePrepared(sql, bind, 5);
 }
 
-// 存储群聊消息（status: 0=已送达, 2=离线待投递）
+// 存储群聊消息
 void ChatHistoryModel::insertGroupChat(int fromid, int groupid, const string& msg,
-                                       int status)
+                                       int status, const string& extra)
 {
     auto mysql = ConnectionPool::instance()->getConnection();
 
     const string sql =
-        "insert into chatmessage(fromid, toid, groupid, msg, status) values(?, null, ?, ?, ?)";
+        "insert into chatmessage(fromid, toid, groupid, msg, status, extra) "
+        "values(?, null, ?, ?, ?, ?)";
 
-    unsigned long msgLength = static_cast<unsigned long>(msg.size());
+    unsigned long msgLen = static_cast<unsigned long>(msg.size());
+    unsigned long extraLen = static_cast<unsigned long>(extra.size());
 
-    MYSQL_BIND bind[4];
+    MYSQL_BIND bind[5];
     memset(bind, 0, sizeof(bind));
 
     bind[0].buffer_type = MYSQL_TYPE_LONG;
@@ -60,13 +70,19 @@ void ChatHistoryModel::insertGroupChat(int fromid, int groupid, const string& ms
 
     bind[2].buffer_type = MYSQL_TYPE_STRING;
     bind[2].buffer = const_cast<char*>(msg.c_str());
-    bind[2].buffer_length = msgLength;
-    bind[2].length = &msgLength;
+    bind[2].buffer_length = msgLen;
+    bind[2].length = &msgLen;
 
     bind[3].buffer_type = MYSQL_TYPE_TINY;
     bind[3].buffer = reinterpret_cast<char*>(&status);
 
-    mysql->executePrepared(sql, bind, 4);
+    bind[4].buffer_type = MYSQL_TYPE_STRING;
+    bind[4].buffer = extra.empty() ? nullptr : const_cast<char*>(extra.c_str());
+    bind[4].buffer_length = extraLen;
+    bind[4].length = &extraLen;
+    bind[4].is_null = extra.empty() ? (my_bool*)1 : nullptr;
+
+    mysql->executePrepared(sql, bind, 5);
 }
 
 // 查询某个用户最近的单聊历史消息

@@ -39,6 +39,9 @@ public:
     // 设置断线自动重连（默认开启）
     void setAutoReconnect(bool enabled);
 
+    // 使用 Protobuf 协议（默认 JSON）
+    void setUseProtobuf(bool enabled);
+
 signals:
     void connected();
     void disconnected();
@@ -78,12 +81,15 @@ private slots:
 private:
     void sendJson(const QJsonObject &obj);
     void dispatchMessage(const QJsonObject &obj);
+    void sendProtoFrame(int msgid, const QByteArray& payload);
+    void negotiateProto();
 
     QTcpSocket *m_socket;
-    QByteArray m_recvBuf;        // 接收缓冲区，处理 TCP 粘包
-    QString m_host;              // 上次连接的地址，用于自动重连
+    QByteArray m_recvBuf;        // 接收缓冲区，JSON/Protobuf 共用
+    QString m_host;
     quint16 m_port = 0;
     bool m_autoReconnect = true;
+    bool m_useProtobuf = false;
 };
 
 #endif

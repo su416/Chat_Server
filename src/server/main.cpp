@@ -82,6 +82,20 @@ int main(int argc, char **argv)
     );
 
     server.start();
+
+    // 向 Redis 注册本 ChatServer 实例（服务发现 + 负载均衡）
+    {
+        auto& cfg = Config::instance();
+        ChatService::instance()->getRedis()->registerServer(
+            cfg.getServerName(), cfg.getServerIp(),
+            static_cast<int>(cfg.getServerPort()));
+    }
+
+    // 定期心跳：每 5 秒更新连接数到 Redis
+    loop.runEvery(5.0, []() {
+        ChatService::instance()->syncServerConnections();
+    });
+
     loop.loop();  // 阻塞直到 quit() 被调用
 
     // 优雅关闭：释放所有资源

@@ -98,6 +98,14 @@ MsgHandler ChatService::getHandler(int msgid)
     }
 }
 
+// 同步当前在线人数到 Redis（供负载均衡选最少连接实例）
+void ChatService::syncServerConnections()
+{
+    auto& cfg = Config::instance();
+    int count = static_cast<int>(_userConnMap.size());
+    _redis.updateConnections(cfg.getServerName(), count);
+}
+
 // 协议协商 msgid=0
 void ChatService::negotiate(const TcpConnectionPtr &conn, json &js, Timestamp time)
 {
@@ -154,6 +162,8 @@ void ChatService::login(const TcpConnectionPtr &conn, json &js, Timestamp time)
                 lock_guard<shared_mutex> lock(_connMutex);
                 _userConnMap.insert({id, conn});
             }
+
+            syncServerConnections();
 
             // id用户登录成功后，向redis订阅channel(id)
             _redis.subscribe(id);
@@ -279,6 +289,8 @@ void ChatService::loginout(const TcpConnectionPtr &conn, json &js, Timestamp tim
         }
     }
 
+    syncServerConnections();
+
     // 用户注销，相当于就是下线，在redis中取消订阅通道
     _redis.unsubscribe(userid);
 
@@ -304,6 +316,8 @@ void ChatService::clientCloseException(const TcpConnectionPtr &conn)
             }
         }
     }
+
+    syncServerConnections();
 
     // 用户注销，相当于就是下线，在redis中取消订阅通道
     _redis.unsubscribe(user.getId());
@@ -334,9 +348,11 @@ void ChatService::oneChat(const TcpConnectionPtr &conn, json &js, Timestamp time
         return;
     }
 
-    // 异步落库单聊历史消息（不阻塞 IO 线程）
-    DBThreadPool::instance()->submitVoid([this, fromid, toid, msg]() {
-        _chatHistoryModel.insertOneChat(fromid, toid, msg);
+    // 异步落库单聊历史消息（快照发送者昵称到 extra 列，避免历史查询 JOIN）
+    string name = js.value("name", "");
+    string extra = name.empty() ? "" : json{{"name", name}}.dump();
+    DBThreadPool::instance()->submitVoid([this, fromid, toid, msg, extra]() {
+        _chatHistoryModel.insertOneChat(fromid, toid, msg, 0, extra);
     });
 
     {
@@ -561,10 +577,14 @@ void ChatService::groupChat(const TcpConnectionPtr &conn, json &js, Timestamp ti
         return;
     }
 
-    // 异步落库群聊历史消息（不阻塞 IO 线程）
-    DBThreadPool::instance()->submitVoid([this, userid, groupid, msg]() {
-        _chatHistoryModel.insertGroupChat(userid, groupid, msg);
-    });
+    // 异步落库群聊历史消息（快照发送者昵称）
+    {
+        string gname = js.value("name", "");
+        string gextra = gname.empty() ? "" : json{{"name", gname}}.dump();
+        DBThreadPool::instance()->submitVoid([this, userid, groupid, msg, gextra]() {
+            _chatHistoryModel.insertGroupChat(userid, groupid, msg, 0, gextra);
+        });
+    }
 
     vector<int> useridVec = _groupModel.queryGroupUsers(userid, groupid);
 
