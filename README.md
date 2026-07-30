@@ -154,7 +154,7 @@ python3 script/bench_groupchat.py     # 群聊 (5→50 人群)
 | 9 | 密码安全 | SHA-256 + 盐值 (OpenSSL) | 非明文存储 |
 | 10 | 工程化 | Docker Compose + 配置化 | 一键部署 |
 
-## 面试核心数据
+## 核心数据
 
 > P50 延迟 2984ms→37ms 降 98.8%，QPS 75→8195 升 109 倍，并发 200 零丢失。用 dmesg+addr2line+GDB 定位 segfault，Valgrind 验证零泄漏。shared_mutex 读写锁 + 异步 DB 线程池 + 群聊 N+1 批量查询。Protobuf 双协议共存 + 令牌桶限流 + Redis 降级自动重连。
 
