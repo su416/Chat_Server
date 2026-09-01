@@ -64,7 +64,7 @@ std::string hashPassword(const std::string& password)
 
     return toHex(salt, SALT_LEN) + "$" + toHex(key, KEY_LEN);
 }
-8   
+
 bool verifyPassword(const std::string& password, const std::string& stored)
 {
     size_t pos = stored.find('$');

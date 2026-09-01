@@ -40,6 +40,9 @@ server*.log
 .claude/
 CLAUDE.md
 
+# Codex AI
+/codex.md/
+
 # editor
 .vscode/
 .idea/
