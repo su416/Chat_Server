@@ -43,6 +43,10 @@ CLAUDE.md
 # Codex AI
 /codex.md/
 
+# local evolution documents
+/docs/evolution/
+/docs/PHASE_TASKS.md
+
 # editor
 .vscode/
 .idea/
