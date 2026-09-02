@@ -1,6 +1,7 @@
 # 收集当前目录及子目录源文件
 aux_source_directory(. SERVER_SRC)
 aux_source_directory(./db DB_SRC)
+aux_source_directory(./gateway GATEWAY_SRC)
 aux_source_directory(./model MODEL_SRC)
 aux_source_directory(./redis REDIS_SRC)
 aux_source_directory(./utils UTILS_SRC)
@@ -14,6 +15,7 @@ set(PROTO_SRC
 add_executable(ChatServer
     ${SERVER_SRC}
     ${DB_SRC}
+    ${GATEWAY_SRC}
     ${MODEL_SRC}
     ${REDIS_SRC}
     ${UTILS_SRC}

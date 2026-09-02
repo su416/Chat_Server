@@ -46,6 +46,7 @@ CLAUDE.md
 # local evolution documents
 /docs/evolution/
 /docs/PHASE_TASKS.md
+/docs/adr/
 
 # editor
 .vscode/

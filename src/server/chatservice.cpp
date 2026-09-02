@@ -64,8 +64,8 @@ ChatService::ChatService()
 
         // 设置重连后回调：批量恢复所有在线用户的订阅，消除消息丢失窗口
         _redis.setReconnectHandler([this]() {
-            shared_lock<shared_mutex> lock(_connMutex);
-            for (const auto& [userid, conn] : _userConnMap)
+            const auto userIds = _sessionManager.activeUserIds();
+            for (int userid : userIds)
             {
                 _redis.subscribe(userid);
             }
@@ -102,7 +102,7 @@ MsgHandler ChatService::getHandler(int msgid)
 void ChatService::syncServerConnections()
 {
     auto& cfg = Config::instance();
-    int count = static_cast<int>(_userConnMap.size());
+    int count = static_cast<int>(_sessionManager.activeCount());
     _redis.updateConnections(cfg.getServerName(), count);
 }
 
@@ -157,10 +157,16 @@ void ChatService::login(const TcpConnectionPtr &conn, json &js, Timestamp time)
         }
         else
         {
-            // 登录成功，记录用户连接信息
+            // 登录成功，绑定逻辑会话。并发登录时只允许第一个绑定成功。
+            auto bindOutcome = _sessionManager.bind(id, conn);
+            if (!bindOutcome.bound())
             {
-                lock_guard<shared_mutex> lock(_connMutex);
-                _userConnMap.insert({id, conn});
+                json response;
+                response["msgid"] = LOGIN_MSG_ACK;
+                response["errno"] = 2;
+                response["errmsg"] = "this account is using, input another!";
+                sendTcpJson(conn, response);
+                return;
             }
 
             syncServerConnections();
@@ -280,13 +286,10 @@ void ChatService::loginout(const TcpConnectionPtr &conn, json &js, Timestamp tim
 {
     int userid = js["id"].get<int>();
 
+    // 只允许当前会话对应的连接解绑；旧连接的迟到请求不能删除新会话。
+    if (!_sessionManager.unbindUser(userid, conn))
     {
-        lock_guard<shared_mutex> lock(_connMutex);
-        auto it = _userConnMap.find(userid);
-        if (it != _userConnMap.end())
-        {
-            _userConnMap.erase(it);
-        }
+        return;
     }
 
     syncServerConnections();
@@ -302,32 +305,21 @@ void ChatService::loginout(const TcpConnectionPtr &conn, json &js, Timestamp tim
 // 处理客户端异常退出
 void ChatService::clientCloseException(const TcpConnectionPtr &conn)
 {
-    User user;
+    auto userId = _sessionManager.unbindConnection(conn);
+    if (!userId)
     {
-        lock_guard<shared_mutex> lock(_connMutex);
-        for (auto it = _userConnMap.begin(); it != _userConnMap.end(); ++it)
-        {
-            if (it->second == conn)
-            {
-                // 从map表删除用户的链接信息
-                user.setId(it->first);
-                _userConnMap.erase(it);
-                break;
-            }
-        }
+        // 未登录连接断开不触发 Redis 退订或数据库状态更新。
+        return;
     }
 
     syncServerConnections();
 
     // 用户注销，相当于就是下线，在redis中取消订阅通道
-    _redis.unsubscribe(user.getId());
+    _redis.unsubscribe(*userId);
 
     // 更新用户的状态信息
-    if (user.getId() != -1)
-    {
-        user.setState("offline");
-        _userModel.updateState(user);
-    }
+    User user(*userId, "", "", "offline");
+    _userModel.updateState(user);
 }
 
 // 一对一聊天业务
@@ -355,15 +347,11 @@ void ChatService::oneChat(const TcpConnectionPtr &conn, json &js, Timestamp time
         _chatHistoryModel.insertOneChat(fromid, toid, msg, 0, extra);
     });
 
+    if (auto targetConnection = _sessionManager.connectionForUser(toid))
     {
-        shared_lock<shared_mutex> lock(_connMutex);
-        auto it = _userConnMap.find(toid);
-        if (it != _userConnMap.end())
-        {
-            // toid 在线，转发消息
-            sendTcpJson(it->second, js);
-            return;
-        }
+        // toid 在本节点在线，转发消息。
+        sendTcpJson(targetConnection, js);
+        return;
     }
 
     // 查询 toid 是否在线
@@ -442,14 +430,10 @@ void ChatService::addFriend(const TcpConnectionPtr &conn, json &js, Timestamp ti
         notify["state"] = selfUser.getState();
 
         // 本地在线 → 直接推送
+        if (auto friendConnection = _sessionManager.connectionForUser(friendid))
         {
-            shared_lock<shared_mutex> lock(_connMutex);
-            auto it = _userConnMap.find(friendid);
-            if (it != _userConnMap.end())
-            {
-                sendTcpJson(it->second, notify);
-                return;
-            }
+            sendTcpJson(friendConnection, notify);
+            return;
         }
 
         // 跨服在线 → Redis 推送
@@ -588,25 +572,11 @@ void ChatService::groupChat(const TcpConnectionPtr &conn, json &js, Timestamp ti
 
     vector<int> useridVec = _groupModel.queryGroupUsers(userid, groupid);
 
-    // 读锁：快速扫描 map，收集在线连接和离线 ID
-    vector<TcpConnectionPtr> onlineConns;
+    // 获取路由快照，收集本地在线连接和非本地用户 ID。
     vector<int> offlineIds;
-    {
-        shared_lock<shared_mutex> lock(_connMutex);
-        for (int id : useridVec)
-        {
-            auto it = _userConnMap.find(id);
-            if (it != _userConnMap.end())
-            {
-                onlineConns.push_back(it->second);
-            }
-            else
-            {
-                offlineIds.push_back(id);
-            }
-        }
-    }
-    // 锁已释放，下面的 DB 操作不阻塞其他线程读取 _userConnMap
+    vector<TcpConnectionPtr> onlineConns =
+        _sessionManager.connectionsForUsers(useridVec, offlineIds);
+    // SessionManager 锁已释放，下面的网络和 DB 操作不会阻塞会话读写。
 
     // 转发给在线成员
     for (auto &c : onlineConns)
@@ -647,11 +617,9 @@ void ChatService::groupChat(const TcpConnectionPtr &conn, json &js, Timestamp ti
 // 从redis消息队列中获取订阅的消息
 void ChatService::handleRedisSubscribeMessage(int userid, string msg)
 {
-    shared_lock<shared_mutex> lock(_connMutex);
-    auto it = _userConnMap.find(userid);
-    if (it != _userConnMap.end())
+    if (auto targetConnection = _sessionManager.connectionForUser(userid))
     {
-        sendTcpRaw(it->second, msg);
+        sendTcpRaw(targetConnection, msg);
         return;
     }
 

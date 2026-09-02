@@ -4,8 +4,6 @@
 #include <muduo/net/TcpConnection.h>
 #include <unordered_map>
 #include <functional>
-#include <mutex>
-#include <shared_mutex>
 
 using namespace std;
 using namespace muduo;
@@ -16,6 +14,7 @@ using namespace muduo::net;
 #include "friendmodel.hpp"
 #include "usermodel.hpp"
 #include "chathistorymodel.hpp"
+#include "gateway/session_manager.hpp"
 #include "json.hpp"
 using json = nlohmann::json;
 
@@ -71,10 +70,8 @@ private:
 
     // 存储消息 id 和其对应的业务处理方法
     unordered_map<int, MsgHandler> _msgHandlerMap;
-    // 存储在线用户的通信连接
-    unordered_map<int, TcpConnectionPtr> _userConnMap;
-    // 读写锁：读(在线查找)支持并发，写(登录/登出)互斥
-    shared_mutex _connMutex;
+    // 逻辑会话与 TCP 连接生命周期分离；业务层不再直接维护连接映射。
+    gateway::SessionManager _sessionManager;
 
     // 数据操作类对象
     UserModel _userModel;

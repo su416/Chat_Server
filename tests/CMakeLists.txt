@@ -43,6 +43,12 @@ add_executable(test_password_utils
 )
 target_link_libraries(test_password_utils ${COMMON_LIBS})
 
+add_executable(test_session_manager
+    test_session_manager.cpp
+    ${PROJECT_SOURCE_DIR}/src/server/gateway/session_manager.cpp
+)
+target_link_libraries(test_session_manager ${COMMON_LIBS} pthread)
+
 # --- Qt Model 测试（需要 Qt6::Core） ---
 
 find_package(Qt6 QUIET COMPONENTS Core)
@@ -62,7 +68,7 @@ endif()
 
 # --- 注册到 CTest ---
 enable_testing()
-foreach(test_name test_rate_limiter test_jsoncodec test_protocodec test_password_utils test_friendlistmodel)
+foreach(test_name test_rate_limiter test_jsoncodec test_protocodec test_password_utils test_session_manager test_friendlistmodel)
     if(TARGET ${test_name})
         add_test(NAME ${test_name} COMMAND $<TARGET_FILE:${test_name}>)
     endif()
