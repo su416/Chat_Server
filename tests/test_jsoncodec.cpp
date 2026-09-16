@@ -74,3 +74,20 @@ TEST(JsonCodecTest, PartialThenComplete)
     EXPECT_TRUE(JsonCodec::tryExtractFrame(&buf, frame));
     EXPECT_EQ(frame, "hello");
 }
+
+TEST(JsonCodecTest, ExplicitResultDistinguishesIncompleteAndOversized)
+{
+    Buffer incomplete;
+    incomplete.append("1234", 4);
+    auto incompleteResult = JsonCodec::decode(&incomplete, 4);
+    EXPECT_EQ(incompleteResult.status,
+              protocol::FrameDecodeStatus::Incomplete);
+    EXPECT_EQ(incomplete.readableBytes(), 4u);
+
+    incomplete.append("5", 1);
+    auto oversizedResult = JsonCodec::decode(&incomplete, 4);
+    EXPECT_EQ(oversizedResult.status, protocol::FrameDecodeStatus::Error);
+    EXPECT_EQ(oversizedResult.error,
+              protocol::FrameDecodeError::OversizedFrame);
+    EXPECT_EQ(incomplete.readableBytes(), 0u);
+}

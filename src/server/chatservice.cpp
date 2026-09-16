@@ -1,7 +1,6 @@
 #include "chatservice.hpp"
 #include "chatserver.hpp"
 #include "public.hpp"
-#include "jsoncodec.hpp"
 #include "password_utils.hpp"
 #include "rate_limiter.hpp"
 #include "db_thread_pool.hpp"
@@ -9,6 +8,7 @@
 #include <vector>
 #include "proto_utils.hpp"
 #include "config.hpp"
+#include <boost/any.hpp>
 
 using namespace std;
 using namespace muduo;
@@ -17,13 +17,20 @@ namespace
 {
 void sendTcpJson(const TcpConnectionPtr &conn, const json &js)
 {
-    conn->send(ChatServer::encodeResponse(conn, js.dump()));
+    ChatServer::sendResponse(conn, js);
 }
 
 void sendTcpRaw(const TcpConnectionPtr &conn, const std::string &payload)
 {
-    // Redis 转发的跨服消息始终用 JSON 编码（内部协议不暴露给客户端）
-    conn->send(JsonCodec::encode(payload));
+    // Redis 内部仍传 JSON；到客户端时按该连接的 wire protocol 重新编码。
+    try
+    {
+        ChatServer::sendResponse(conn, json::parse(payload));
+    }
+    catch (const std::exception& error)
+    {
+        LOG_WARN << "invalid internal Redis message: " << error.what();
+    }
 }
 }
 
@@ -80,22 +87,15 @@ void ChatService::reset()
     _userModel.resetState();
 }
 
-// 获取消息对应的处理器
-MsgHandler ChatService::getHandler(int msgid)
+// 获取消息对应的处理器；未知类型由 MessageRouter 显式处理。
+std::optional<MsgHandler> ChatService::findHandler(int msgid) const
 {
-    // 记录错误日志，msgid没有对应的事件处理回调
     auto it = _msgHandlerMap.find(msgid);
     if (it == _msgHandlerMap.end())
     {
-        // 返回一个默认的处理器，空操作
-        return [=](const TcpConnectionPtr &conn, json &js, Timestamp) {
-            LOG_ERROR << "msgid:" << msgid << " can not find handler!";
-        };
+        return std::nullopt;
     }
-    else
-    {
-        return _msgHandlerMap[msgid];
-    }
+    return it->second;
 }
 
 // 同步当前在线人数到 Redis（供负载均衡选最少连接实例）
@@ -113,28 +113,37 @@ void ChatService::negotiate(const TcpConnectionPtr &conn, json &js, Timestamp ti
     json response;
     response["msgid"] = 0;
 
+    protocol::ProtocolState state;
+    const auto& context = conn->getContext();
+    if (const auto* stored = boost::any_cast<protocol::ProtocolState>(&context))
+    {
+        state = *stored;
+    }
+
     if (accept == "protobuf")
     {
-        conn->setContext(ConnProtocol::PROTO_PROTOBUF);
+        state.selectAfterNegotiation(protocol::WireProtocol::Protobuf);
         response["content_type"] = "protobuf";
         response["status"] = "ok";
     }
     else if (accept == "json")
     {
-        conn->setContext(ConnProtocol::PROTO_JSON);
+        state.selectAfterNegotiation(protocol::WireProtocol::Json);
         response["content_type"] = "json";
         response["status"] = "ok";
     }
     else
     {
         // 不认识的格式，保持默认 JSON
-        conn->setContext(ConnProtocol::PROTO_JSON);
+        state.selectAfterNegotiation(protocol::WireProtocol::Json);
         response["content_type"] = "json";
         response["status"] = "unknown_format, fallback to json";
     }
 
-    // 协商响应始终走 JSON（客户端还没切协议，不能包成 Protobuf）
-    conn->send(JsonCodec::encode(response.dump()));
+    conn->setContext(state);
+
+    // 协商响应始终走 JSON（客户端还没切协议）。
+    ChatServer::sendResponse(conn, response, true);
 }
 
 // 处理登录业务

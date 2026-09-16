@@ -3,6 +3,15 @@
 
 #include <string>
 #include <muduo/net/Buffer.h>
+#include "protocol/frame_decode_result.hpp"
+
+#include <cstddef>
+
+struct BinaryFrameDecodeResult
+{
+    protocol::FrameDecodeResult frameResult;
+    int messageType = 0;
+};
 
 // Binary 协议编解码
 // 帧格式：[1B 0xFF][1B msgId][2B bodyLen BE][body bytes]
@@ -14,6 +23,10 @@ public:
 
     // 解码：从 Buffer 中提取一帧。返回 true 表示成功拿到完整帧
     static bool tryExtractFrame(muduo::net::Buffer* buffer, int& msgId, std::string& body);
+
+    static BinaryFrameDecodeResult decode(
+        muduo::net::Buffer* buffer,
+        std::size_t maxFrameSize = protocol::kDefaultMaxFrameSize);
 };
 
 #endif

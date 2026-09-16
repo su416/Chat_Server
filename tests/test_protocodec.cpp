@@ -4,6 +4,7 @@
 #include <gtest/gtest.h>
 #include "protocodec.hpp"
 #include <muduo/net/Buffer.h>
+#include <arpa/inet.h>
 
 using muduo::net::Buffer;
 
@@ -83,4 +84,17 @@ TEST(ProtoCodecTest, MultipleFrames)
     EXPECT_EQ(d1, "first");
     EXPECT_TRUE(ProtoCodec::tryExtractFrame(&buf, d2));
     EXPECT_EQ(d2, "second");
+}
+
+TEST(ProtoCodecTest, OversizedLengthIsRejectedBeforeBodyArrives)
+{
+    uint32_t length = htonl(65u);
+    Buffer buffer;
+    buffer.append(reinterpret_cast<const char*>(&length), sizeof(length));
+
+    auto result = ProtoCodec::decode(&buffer, 64);
+
+    EXPECT_EQ(result.status, protocol::FrameDecodeStatus::Error);
+    EXPECT_EQ(result.error, protocol::FrameDecodeError::OversizedFrame);
+    EXPECT_EQ(buffer.readableBytes(), 0u);
 }

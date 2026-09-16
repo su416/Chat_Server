@@ -49,6 +49,38 @@ add_executable(test_session_manager
 )
 target_link_libraries(test_session_manager ${COMMON_LIBS} pthread)
 
+add_executable(test_message_decoder
+    test_message_decoder.cpp
+    ${PROJECT_SOURCE_DIR}/src/server/protocol/message_decoder.cpp
+    ${PROJECT_SOURCE_DIR}/src/server/jsoncodec.cpp
+    ${PROJECT_SOURCE_DIR}/src/server/protocodec.cpp
+    ${PROJECT_SOURCE_DIR}/src/server/binary_codec.cpp
+    ${PROJECT_SOURCE_DIR}/build/generated/proto/chat.pb.cc
+)
+target_link_libraries(test_message_decoder
+    ${COMMON_LIBS}
+    muduo_net
+    muduo_base
+    pthread
+    ${Protobuf_LIBRARIES}
+)
+
+add_executable(test_message_router
+    test_message_router.cpp
+    ${PROJECT_SOURCE_DIR}/src/server/gateway/message_router.cpp
+    ${PROJECT_SOURCE_DIR}/src/server/protocol/message_encoder.cpp
+    ${PROJECT_SOURCE_DIR}/src/server/jsoncodec.cpp
+    ${PROJECT_SOURCE_DIR}/src/server/protocodec.cpp
+    ${PROJECT_SOURCE_DIR}/build/generated/proto/chat.pb.cc
+)
+target_link_libraries(test_message_router
+    ${COMMON_LIBS}
+    muduo_net
+    muduo_base
+    pthread
+    ${Protobuf_LIBRARIES}
+)
+
 # --- Qt Model 测试（需要 Qt6::Core） ---
 
 find_package(Qt6 QUIET COMPONENTS Core)
@@ -68,7 +100,7 @@ endif()
 
 # --- 注册到 CTest ---
 enable_testing()
-foreach(test_name test_rate_limiter test_jsoncodec test_protocodec test_password_utils test_session_manager test_friendlistmodel)
+foreach(test_name test_rate_limiter test_jsoncodec test_protocodec test_password_utils test_session_manager test_message_decoder test_message_router test_friendlistmodel)
     if(TARGET ${test_name})
         add_test(NAME ${test_name} COMMAND $<TARGET_FILE:${test_name}>)
     endif()

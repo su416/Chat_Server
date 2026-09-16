@@ -3,12 +3,11 @@
 
 #include <muduo/net/TcpServer.h>
 #include <muduo/net/EventLoop.h>
+#include "gateway/message_router.hpp"
+#include "protocol/protocol_state.hpp"
 #include <string>
 using namespace muduo;
 using namespace muduo::net;
-
-// 连接协议类型（通过 conn->setContext 存储）
-enum ConnProtocol { PROTO_JSON = 1, PROTO_PROTOBUF = 2 };
 
 // 聊天服务器的主类
 class ChatServer
@@ -20,9 +19,10 @@ public:
                int threadNum);
     void start();
 
-    // 协议感知响应编码：JSON 连接走 JsonCodec，Protobuf 连接走 ProtoCodec
-    static std::string encodeResponse(const TcpConnectionPtr& conn,
-                                      const std::string& jsonBody);
+    // 客户端统一出站边界：业务 JSON 转内部消息后按连接协议编码。
+    static void sendResponse(const TcpConnectionPtr& conn,
+                             const nlohmann::json& response,
+                             bool forceJson = false);
 
 private:
     void onConnection(const TcpConnectionPtr &);
@@ -30,6 +30,7 @@ private:
 
     TcpServer _server;
     EventLoop *_loop;
+    gateway::MessageRouter _router;
 };
 
 #endif

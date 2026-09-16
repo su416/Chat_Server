@@ -4,6 +4,7 @@
 #include <muduo/net/TcpConnection.h>
 #include <unordered_map>
 #include <functional>
+#include <optional>
 
 using namespace std;
 using namespace muduo;
@@ -52,7 +53,7 @@ public:
     // 服务器异常，业务重置方法
     void reset();
     // 获取消息对应的处理器
-    MsgHandler getHandler(int msgid);
+    std::optional<MsgHandler> findHandler(int msgid) const;
     // 从 redis 消息队列中获取订阅的消息
     void handleRedisSubscribeMessage(int, string);
 
