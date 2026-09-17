@@ -6,6 +6,7 @@
 
 #include <atomic>
 #include <functional>
+#include <thread>
 #include <optional>
 #include <string>
 
@@ -25,19 +26,44 @@ struct RoutedMessage {
     static std::optional<RoutedMessage> decode(const std::string& encoded);
 };
 
-// Pub/Sub 是非持久传输。routeId 与目标节点生成的 deliveryId 不同。
+enum class RouteOutcome { Accepted, Retry, Terminal };
+struct RouteMetrics {
+    std::uint64_t produced = 0, consumed = 0, acked = 0;
+    std::uint64_t retried = 0, claimed = 0, duplicate = 0, failed = 0;
+    std::uint64_t pending = 0;
+};
+
+// 每节点一条 Stream + Consumer Group；routeId 与目标节点 deliveryId 不同。
 class RouteTransport final {
 public:
-    RouteTransport(Redis& redis, std::string nodeId);
-    bool start(std::function<void(RoutedMessage)> handler);
+    RouteTransport(Redis& redis, std::string nodeId, std::string generation = "");
+    ~RouteTransport();
+    bool start(std::function<RouteOutcome(RoutedMessage)> handler);
+    void stop();
     bool send(const RoutedMessage& message);
+    // Accepted / Duplicate / Error. Marker is written only after local Pending accepted.
+    enum class DedupResult { New, Duplicate, Error };
+    DedupResult markAccepted(const std::string& routeId);
+    RouteMetrics metrics() const;
     std::string nextRouteId();
-    static std::string channelFor(const std::string& nodeId);
+    static std::string streamFor(const std::string& nodeId);
 
 private:
+    void consume();
+    bool ack(const std::string& entryId);
+    bool handleEntry(const std::string& entryId, const std::string& payload,
+                     int attempts);
     Redis& _redis;
     std::string _nodeId;
+    std::string _generation;
+    std::string _group;
+    std::string _consumer;
+    std::function<RouteOutcome(RoutedMessage)> _handler;
+    std::thread _worker;
+    std::atomic<bool> _stopping{false};
     std::atomic<std::uint64_t> _next{1};
+    std::atomic<std::uint64_t> _produced{0}, _consumed{0}, _acked{0},
+        _retried{0}, _claimed{0}, _duplicate{0}, _failed{0};
 };
 
 } // namespace cluster

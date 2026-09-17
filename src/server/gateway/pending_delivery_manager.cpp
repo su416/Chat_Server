@@ -101,6 +101,17 @@ AckResult PendingDeliveryManager::ack(
     return AckResult::Acked;
 }
 
+bool PendingDeliveryManager::cancel(std::uint64_t deliveryId)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    auto it = _pending.find(deliveryId);
+    if (it == _pending.end()) return false;
+    _pendingBytes -= it->second.payloadBytes;
+    _pending.erase(it);
+    ++_metrics.failed;
+    return true;
+}
+
 std::vector<RetryAction> PendingDeliveryManager::scanExpired(
     Clock::time_point now)
 {

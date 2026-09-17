@@ -33,6 +33,7 @@ public:
     PresenceManager(Redis& redis, std::string nodeId,
                     int leaseSeconds = 20);
     const std::string& nodeId() const { return _nodeId; }
+    const std::string& generation() const { return _generation; }
     bool registerNode();
     bool heartbeat(const std::vector<std::pair<int, std::uint64_t>>& localSessions);
     bool unregisterNode();

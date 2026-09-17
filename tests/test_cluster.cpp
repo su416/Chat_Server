@@ -99,12 +99,129 @@ TEST_F(ClusterTest, DeadNodePresenceIsCleaned)
     EXPECT_EQ(reply->type, REDIS_REPLY_NIL);
 }
 
-TEST_F(ClusterTest, UnknownNodeHasNoSubscriber)
+TEST_F(ClusterTest, RouteIsStoredWithoutOnlineConsumer)
 {
     cluster::RouteTransport transport(redis, nodeA);
-    cluster::RoutedMessage route{"test-route", nodeA, "nonexistent-target-node",
+    cluster::RoutedMessage route{"test-route", nodeA, nodeB,
         6, userId, userId + 1, 0, {{"msgid", 6}, {"msg", "internal"}}};
-    EXPECT_FALSE(transport.send(route));
+    const auto stream = cluster::RouteTransport::streamFor(nodeB);
+    ASSERT_TRUE(transport.send(route));
+    auto reply = redis.command({"XLEN", stream});
+    ASSERT_TRUE(reply);
+    ASSERT_EQ(reply->type, REDIS_REPLY_INTEGER);
+    EXPECT_EQ(reply->integer, 1);
+    redis.command({"DEL", stream});
+}
+
+TEST_F(ClusterTest, ConsumerAcknowledgesOnlyAcceptedRoute)
+{
+    cluster::RouteTransport source(redis, nodeA, "source");
+    cluster::RouteTransport target(redis, nodeB, "target");
+    cluster::RoutedMessage route{"test-route-" + std::to_string(userId), nodeA, nodeB,
+        6, userId, userId + 1, 0, {{"msgid", 6}, {"msg", "internal"}}};
+    ASSERT_TRUE(source.send(route));
+    std::atomic<int> calls{0};
+    ASSERT_TRUE(target.start([&](cluster::RoutedMessage received) {
+        EXPECT_EQ(received.routeId, route.routeId);
+        return ++calls == 1 ? cluster::RouteOutcome::Retry
+                            : cluster::RouteOutcome::Accepted;
+    }));
+    for (int i = 0; i < 80 && target.metrics().acked == 0; ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    EXPECT_GE(calls.load(), 2);
+    EXPECT_EQ(target.metrics().acked, 1);
+    EXPECT_EQ(target.metrics().pending, 0);
+    target.stop();
+    redis.command({"DEL", cluster::RouteTransport::streamFor(nodeB),
+                   "chat:route:dedup:" + nodeB});
+}
+
+TEST_F(ClusterTest, RouteIdDedupIsBoundedByTtl)
+{
+    cluster::RouteTransport target(redis, nodeB);
+    const auto routeId = "dedup-" + std::to_string(userId);
+    EXPECT_EQ(target.markAccepted(routeId),
+              cluster::RouteTransport::DedupResult::New);
+    EXPECT_EQ(target.markAccepted(routeId),
+              cluster::RouteTransport::DedupResult::Duplicate);
+    auto ttl = redis.command({"TTL", "chat:route:dedup:" + nodeB});
+    ASSERT_TRUE(ttl);
+    EXPECT_GT(ttl->integer, 0);
+    redis.command({"DEL", "chat:route:dedup:" + nodeB});
+}
+
+TEST_F(ClusterTest, UnackedPendingIsClaimedAfterConsumerRestart)
+{
+    const auto stream = cluster::RouteTransport::streamFor(nodeB);
+    cluster::RouteTransport source(redis, nodeA, "source");
+    cluster::RoutedMessage route{"restart-" + std::to_string(userId), nodeA, nodeB,
+        6, userId, userId + 1, 0, {{"msgid", 6}, {"msg", "recover"}}};
+    cluster::RouteTransport first(redis, nodeB, "first");
+    std::atomic<int> firstCalls{0};
+    ASSERT_TRUE(first.start([&](cluster::RoutedMessage received) {
+        EXPECT_EQ(received.routeId, route.routeId);
+        ++firstCalls;
+        return cluster::RouteOutcome::Retry;
+    }));
+    ASSERT_TRUE(source.send(route));
+    for (int i = 0; i < 30 && firstCalls == 0; ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    EXPECT_EQ(first.metrics().pending, 1);
+    first.stop();
+    cluster::RouteTransport replacement(redis, nodeB, "replacement");
+    std::atomic<int> recovered{0};
+    ASSERT_TRUE(replacement.start([&](cluster::RoutedMessage received) {
+        EXPECT_EQ(received.routeId, route.routeId);
+        ++recovered;
+        return cluster::RouteOutcome::Accepted;
+    }));
+    for (int i = 0; i < 80 && replacement.metrics().acked == 0; ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    EXPECT_EQ(recovered.load(), 1);
+    EXPECT_EQ(replacement.metrics().claimed, 1);
+    EXPECT_EQ(replacement.metrics().pending, 0);
+    replacement.stop();
+    redis.command({"DEL", stream});
+}
+
+TEST_F(ClusterTest, TrimmingPreservesOlderUnackedPayload)
+{
+    const auto stream = cluster::RouteTransport::streamFor(nodeB);
+    cluster::RouteTransport source(redis, nodeA, "source");
+    cluster::RouteTransport target(redis, nodeB, "target");
+    const auto base = "trim-" + std::to_string(userId);
+    cluster::RoutedMessage pending{base + "-pending", nodeA, nodeB,
+        6, userId, userId + 1, 0, {{"msgid", 6}, {"msg", "pending"}}};
+    cluster::RoutedMessage accepted = pending;
+    accepted.routeId = base + "-accepted";
+    accepted.payload["msg"] = "accepted";
+    ASSERT_TRUE(target.start([&](cluster::RoutedMessage route) {
+        return route.routeId == accepted.routeId
+            ? cluster::RouteOutcome::Accepted : cluster::RouteOutcome::Retry;
+    }));
+    ASSERT_TRUE(source.send(pending));
+    ASSERT_TRUE(source.send(accepted));
+    for (int i = 0; i < 30 && target.metrics().acked == 0; ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    EXPECT_EQ(target.metrics().pending, 1);
+    auto entries = redis.command({"XRANGE", stream, "-", "+"});
+    ASSERT_TRUE(entries);
+    ASSERT_EQ(entries->type, REDIS_REPLY_ARRAY);
+    bool foundPending = false;
+    for (size_t i = 0; i < entries->elements; ++i) {
+        const auto* item = entries->element[i];
+        if (item && item->type == REDIS_REPLY_ARRAY && item->elements == 2 &&
+            item->element[1] && item->element[1]->type == REDIS_REPLY_ARRAY) {
+            const auto* fields = item->element[1];
+            for (size_t field = 0; field + 1 < fields->elements; field += 2)
+                if (fields->element[field + 1] && fields->element[field + 1]->str &&
+                    std::string(fields->element[field + 1]->str).find(pending.routeId)
+                        != std::string::npos) foundPending = true;
+        }
+    }
+    EXPECT_TRUE(foundPending);
+    target.stop();
+    redis.command({"DEL", stream});
 }
 
 TEST(ClusterRouteMessage, InternalMessageRoundTripAndValidation)
@@ -116,6 +233,8 @@ TEST(ClusterRouteMessage, InternalMessageRoundTripAndValidation)
     EXPECT_EQ(decoded->routeId, "route-1");
     EXPECT_EQ(decoded->payload.at("msg"), "hello");
     EXPECT_FALSE(cluster::RoutedMessage::decode("{broken"));
+    route.hops = 1;
+    EXPECT_TRUE(cluster::RoutedMessage::decode(route.encode()));
     route.hops = 2;
     EXPECT_FALSE(cluster::RoutedMessage::decode(route.encode()));
 }

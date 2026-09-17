@@ -10,6 +10,7 @@
 #include "config.hpp"
 #include "gateway/delivery_id.hpp"
 #include <boost/any.hpp>
+#include <future>
 
 using namespace std;
 using namespace muduo;
@@ -33,7 +34,7 @@ ChatService *ChatService::instance()
 // 注册消息以及对应的Handler回调操作
 ChatService::ChatService()
     : _presence(_redis, Config::instance().getNodeId()),
-      _route(_redis, Config::instance().getNodeId())
+      _route(_redis, Config::instance().getNodeId(), _presence.generation())
 {
     // 协议协商（msgid=0）——客户端声明偏好，服务端确认
     _msgHandlerMap.insert({NEGOTIATE_MSG, std::bind(&ChatService::negotiate, this, _1, _2, _3)});
@@ -58,13 +59,14 @@ ChatService::ChatService()
     if (!_redis.connect()) LOG_ERROR << "Redis unavailable at startup";
     if (!_presence.registerNode()) LOG_ERROR << "NODE_REGISTER failed";
     if (!_route.start([this](cluster::RoutedMessage message) {
-            handleRoutedMessage(std::move(message));
-        })) LOG_ERROR << "ROUTE_SUBSCRIBE failed";
+            return handleRoutedMessage(std::move(message));
+        })) LOG_ERROR << "ROUTE_STREAM_CONSUMER failed";
 }
 
 // 服务器异常，业务重置方法
 void ChatService::reset()
 {
+    _route.stop();
     _mainLoop.store(nullptr);
     for (const auto& [userId, sessionId] : _sessionManager.activeSessions())
     {
@@ -682,7 +684,7 @@ ChatService::RouteStatus ChatService::routeToUser(
     if (!_route.send(route))
     {
         ++_routeFailed;
-        LOG_ERROR << "ROUTE_FAILED publish route=" << route.routeId
+        LOG_ERROR << "ROUTE_FAILED xadd route=" << route.routeId
                   << " target=" << route.targetNode;
         return RouteStatus::Error;
     }
@@ -699,7 +701,7 @@ void ChatService::storeOffline(int senderId, int receiverId, const json& payload
     });
 }
 
-void ChatService::handleRoutedMessage(cluster::RoutedMessage message)
+cluster::RouteOutcome ChatService::handleRoutedMessage(cluster::RoutedMessage message)
 {
     ++_routeReceived;
     if (message.targetNode != _presence.nodeId() ||
@@ -713,20 +715,30 @@ void ChatService::handleRoutedMessage(cluster::RoutedMessage message)
     {
         ++_routeFailed;
         LOG_WARN << "ROUTE_FAILED malformed target=" << message.targetNode;
-        return;
+        return cluster::RouteOutcome::Terminal;
     }
-    // Subscriber thread only parses, validates and locates a Session; all further
-    // owner checks/encoding occur on a Muduo loop, never against foreign context.
+    // Stream consumer thread only locates the loop. It never touches client context.
     auto session = _sessionManager.sessionForUser(message.receiverUserId);
     auto connection = session ? session->connection() : nullptr;
     auto* loop = connection ? connection->getLoop() : _mainLoop.load();
-    if (!loop) { ++_routeFailed; return; }
-    loop->queueInLoop([this, message = std::move(message)]() mutable {
-        processRoutedMessage(std::move(message));
+    if (!loop) { ++_routeFailed; return cluster::RouteOutcome::Retry; }
+    auto result = std::make_shared<std::promise<cluster::RouteOutcome>>();
+    auto future = result->get_future();
+    auto expired = std::make_shared<std::atomic<bool>>(false);
+    loop->queueInLoop([this, message = std::move(message), result, expired]() mutable {
+        if (expired->load()) return;
+        try { result->set_value(processRoutedMessage(std::move(message))); }
+        catch (...) { result->set_value(cluster::RouteOutcome::Retry); }
     });
+    if (future.wait_for(std::chrono::seconds(3)) == std::future_status::ready)
+        return future.get();
+    expired->store(true);
+    ++_routeFailed;
+    LOG_ERROR << "ROUTE_ACCEPT_TIMEOUT";
+    return cluster::RouteOutcome::Retry;
 }
 
-void ChatService::processRoutedMessage(cluster::RoutedMessage message)
+cluster::RouteOutcome ChatService::processRoutedMessage(cluster::RoutedMessage message)
 {
     auto owner = _presence.lookupUser(message.receiverUserId);
     auto session = _sessionManager.sessionForUser(message.receiverUserId);
@@ -736,10 +748,16 @@ void ChatService::processRoutedMessage(cluster::RoutedMessage message)
         _presence.ownsUser(message.receiverUserId, session->id()))
     {
         if (message.messageType == ONE_CHAT_MSG)
-            deliverRoutedOneChat(session, message.payload);
-        else if (auto target = session->connection())
-            ChatServer::sendResponse(target, message.payload);
-        return;
+            return deliverRoutedOneChat(session, message);
+        if (auto target = session->connection()) {
+            const auto marked = _route.markAccepted(message.routeId);
+            if (marked == cluster::RouteTransport::DedupResult::Error)
+                return cluster::RouteOutcome::Retry;
+            if (marked == cluster::RouteTransport::DedupResult::New)
+                ChatServer::sendResponse(target, message.payload);
+            return cluster::RouteOutcome::Accepted;
+        }
+        return cluster::RouteOutcome::Retry;
     }
     ++_routeStale;
     LOG_WARN << "ROUTE_STALE id=" << message.routeId
@@ -749,49 +767,65 @@ void ChatService::processRoutedMessage(cluster::RoutedMessage message)
     {
         message.targetNode = owner.owner.nodeId;
         message.hops = 1;
-        if (_route.send(message)) { ++_routeRemote; return; }
+        if (_route.send(message)) {
+            ++_routeRemote;
+            return cluster::RouteOutcome::Accepted;
+        }
     }
-    // Pub/Sub has no server-to-server ACK. A stale route cannot claim delivery.
     ++_routeFailed;
+    // Keep the PEL entry for bounded reclaims. Dead-letter after max attempts.
+    return cluster::RouteOutcome::Retry;
 }
 
-void ChatService::deliverRoutedOneChat(
-    const std::shared_ptr<const gateway::Session>& session, const json& payload)
+cluster::RouteOutcome ChatService::deliverRoutedOneChat(
+    const std::shared_ptr<const gateway::Session>& session,
+    const cluster::RoutedMessage& message)
 {
     auto target = session ? session->connection() : nullptr;
-    if (!target || !target->connected()) { ++_routeFailed; return; }
+    if (!target || !target->connected()) {
+        ++_routeFailed;
+        return cluster::RouteOutcome::Retry;
+    }
     if (target->getLoop() != muduo::net::EventLoop::getEventLoopOfCurrentThread())
     {
-        std::weak_ptr<const gateway::Session> weak = session;
-        target->getLoop()->queueInLoop([this, weak, payload]() {
-            if (auto current = weak.lock()) deliverRoutedOneChat(current, payload);
-        });
-        return;
+        ++_routeFailed;
+        return cluster::RouteOutcome::Retry;
     }
     if (_sessionManager.sessionForUser(session->userId()) != session ||
         !_presence.ownsUser(session->userId(), session->id()))
     {
         ++_routeStale;
-        return;
+        return cluster::RouteOutcome::Retry;
     }
     const auto* state = boost::any_cast<protocol::ProtocolState>(&target->getContext());
     if (state && state->selected() == protocol::WireProtocol::Binary)
     {
-        ChatServer::sendResponse(target, payload);
-        return;
+        const auto marked = _route.markAccepted(message.routeId);
+        if (marked == cluster::RouteTransport::DedupResult::Error)
+            return cluster::RouteOutcome::Retry;
+        if (marked == cluster::RouteTransport::DedupResult::New)
+            ChatServer::sendResponse(target, message.payload);
+        return cluster::RouteOutcome::Accepted;
     }
     const auto deliveryId = _pendingDeliveries.nextDeliveryId();
-    gateway::MessageEnvelope delivery(ONE_CHAT_MSG, payload,
+    gateway::MessageEnvelope delivery(ONE_CHAT_MSG, message.payload,
                                       protocol::WireProtocol::Undetermined, deliveryId);
     if (!_pendingDeliveries.track(session, delivery))
     {
         ++_routeFailed;
         LOG_WARN << "ROUTE_FAILED pending capacity user=" << session->userId();
-        return;
+        return cluster::RouteOutcome::Retry;
+    }
+    const auto marked = _route.markAccepted(message.routeId);
+    if (marked != cluster::RouteTransport::DedupResult::New) {
+        _pendingDeliveries.cancel(deliveryId);
+        return marked == cluster::RouteTransport::DedupResult::Duplicate
+            ? cluster::RouteOutcome::Accepted : cluster::RouteOutcome::Retry;
     }
     LOG_INFO << "ROUTE_DELIVERY route_target=" << _presence.nodeId()
              << " delivery_id=" << deliveryId;
     ChatServer::sendResponse(target, delivery);
+    return cluster::RouteOutcome::Accepted;
 }
 
 // 查询单聊历史消息
@@ -900,6 +934,7 @@ void ChatService::heartbeatPresence()
 void ChatService::logClusterMetrics() const
 {
     const auto presence = _presence.metrics();
+    const auto route = _route.metrics();
     LOG_INFO << "CLUSTER_METRICS node=" << _presence.nodeId()
              << " presence_bind=" << presence.bind
              << " presence_unbind=" << presence.unbind
@@ -911,6 +946,14 @@ void ChatService::logClusterMetrics() const
              << " route_received=" << _routeReceived.load()
              << " route_stale=" << _routeStale.load()
              << " route_failed=" << _routeFailed.load()
+             << " route_produced=" << route.produced
+             << " route_consumed=" << route.consumed
+             << " route_acked=" << route.acked
+             << " route_retried=" << route.retried
+             << " route_claimed=" << route.claimed
+             << " route_duplicate=" << route.duplicate
+             << " route_transport_failed=" << route.failed
+             << " route_pending=" << route.pending
              << " node_heartbeat=" << presence.nodeHeartbeat;
 }
 

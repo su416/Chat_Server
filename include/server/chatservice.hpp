@@ -66,7 +66,7 @@ public:
     // 获取消息对应的处理器
     std::optional<MsgHandler> findHandler(int msgid) const;
     // 从 redis 消息队列中获取订阅的消息
-    void handleRoutedMessage(cluster::RoutedMessage message);
+    cluster::RouteOutcome handleRoutedMessage(cluster::RoutedMessage message);
 
     // 同步连接数到 Redis（供负载均衡）
     void syncServerConnections();
@@ -82,9 +82,10 @@ private:
     enum class RouteStatus { Sent, Offline, Error };
     RouteStatus routeToUser(int receiverId, int senderId, int messageType,
                             const json& payload);
-    void deliverRoutedOneChat(const std::shared_ptr<const gateway::Session>& session,
-                              const json& payload);
-    void processRoutedMessage(cluster::RoutedMessage message);
+    cluster::RouteOutcome deliverRoutedOneChat(
+        const std::shared_ptr<const gateway::Session>& session,
+        const cluster::RoutedMessage& message);
+    cluster::RouteOutcome processRoutedMessage(cluster::RoutedMessage message);
     void storeOffline(int senderId, int receiverId, const json& payload);
 
     // 存储消息 id 和其对应的业务处理方法

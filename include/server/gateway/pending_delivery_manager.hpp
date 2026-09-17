@@ -61,6 +61,7 @@ public:
                Clock::time_point now = Clock::now());
     AckResult ack(std::uint64_t deliveryId,
                   const muduo::net::TcpConnectionPtr& connection);
+    bool cancel(std::uint64_t deliveryId);
     std::vector<RetryAction> scanExpired(Clock::time_point now = Clock::now());
     std::size_t cancelConnection(
         const muduo::net::TcpConnectionPtr& connection);
