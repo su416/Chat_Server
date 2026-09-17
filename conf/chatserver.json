@@ -3,7 +3,8 @@
     "ip": "127.0.0.1",
     "port": 6000,
     "thread_num": 4,
-    "name": "ChatServer"
+    "name": "ChatServer",
+    "node_id": "chat-server-1"
   },
   "mysql": {
     "host": "127.0.0.1",

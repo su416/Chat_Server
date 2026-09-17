@@ -2,9 +2,11 @@
 #define CHATSERVICE_H
 
 #include <muduo/net/TcpConnection.h>
+#include <muduo/net/EventLoop.h>
 #include <unordered_map>
 #include <functional>
 #include <optional>
+#include <atomic>
 
 using namespace std;
 using namespace muduo;
@@ -17,6 +19,8 @@ using namespace muduo::net;
 #include "chathistorymodel.hpp"
 #include "gateway/session_manager.hpp"
 #include "gateway/pending_delivery_manager.hpp"
+#include "cluster/presence_manager.hpp"
+#include "cluster/route_transport.hpp"
 #include "json.hpp"
 using json = nlohmann::json;
 
@@ -42,6 +46,9 @@ public:
     void messageAck(const TcpConnectionPtr &conn, json &js, Timestamp time);
     void scanReliableDeliveries();
     void logDeliveryMetrics() const;
+    void heartbeatPresence();
+    void logClusterMetrics() const;
+    void setMainLoop(muduo::net::EventLoop* loop) { _mainLoop.store(loop); }
     // 添加好友业务
     void addFriend(const TcpConnectionPtr &conn, json &js, Timestamp time);
     // 创建群组业务
@@ -59,7 +66,7 @@ public:
     // 获取消息对应的处理器
     std::optional<MsgHandler> findHandler(int msgid) const;
     // 从 redis 消息队列中获取订阅的消息
-    void handleRedisSubscribeMessage(int, string);
+    void handleRoutedMessage(cluster::RoutedMessage message);
 
     // 同步连接数到 Redis（供负载均衡）
     void syncServerConnections();
@@ -72,6 +79,13 @@ public:
 
 private:
     ChatService();
+    enum class RouteStatus { Sent, Offline, Error };
+    RouteStatus routeToUser(int receiverId, int senderId, int messageType,
+                            const json& payload);
+    void deliverRoutedOneChat(const std::shared_ptr<const gateway::Session>& session,
+                              const json& payload);
+    void processRoutedMessage(cluster::RoutedMessage message);
+    void storeOffline(int senderId, int receiverId, const json& payload);
 
     // 存储消息 id 和其对应的业务处理方法
     unordered_map<int, MsgHandler> _msgHandlerMap;
@@ -87,6 +101,11 @@ private:
 
     // redis 操作对象
     Redis _redis;
+    cluster::PresenceManager _presence;
+    cluster::RouteTransport _route;
+    std::atomic<std::uint64_t> _routeLocal{0}, _routeRemote{0},
+        _routeReceived{0}, _routeStale{0}, _routeFailed{0};
+    std::atomic<muduo::net::EventLoop*> _mainLoop{nullptr};
 };
 
 #endif

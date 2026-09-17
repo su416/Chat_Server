@@ -66,6 +66,17 @@ TEST(SessionManagerTest, RejectsDuplicateActiveLogin)
     EXPECT_EQ(manager.activeCount(), 1u);
 }
 
+TEST(SessionManagerTest, OneConnectionCannotOwnTwoUsers)
+{
+    gateway::SessionManager manager;
+    auto connection = fakeConnection(1);
+    ASSERT_TRUE(manager.bind(1001, connection).bound());
+    EXPECT_EQ(manager.bind(1002, connection).result,
+              gateway::BindResult::ConnectionAlreadyBound);
+    EXPECT_EQ(manager.sessionForConnection(connection)->userId(), 1001);
+    EXPECT_EQ(manager.activeCount(), 1u);
+}
+
 TEST(SessionManagerTest, DisconnectBeforeLoginIsNoOp)
 {
     gateway::SessionManager manager;

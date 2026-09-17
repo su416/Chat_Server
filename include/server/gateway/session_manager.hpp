@@ -16,6 +16,7 @@ enum class BindResult
 {
     Bound,
     DuplicateActiveSession,
+    ConnectionAlreadyBound,
     InvalidConnection
 };
 
@@ -59,6 +60,9 @@ public:
         std::vector<UserId>& unavailableUserIds) const;
 
     std::vector<UserId> activeUserIds() const;
+    std::vector<std::pair<UserId, SessionId>> activeSessions() const;
+    std::shared_ptr<const Session> sessionForConnection(
+        const muduo::net::TcpConnectionPtr& connection) const;
     std::size_t activeCount() const;
 
 private:
@@ -66,6 +70,8 @@ private:
 
     mutable std::shared_mutex _mutex;
     std::unordered_map<UserId, std::shared_ptr<const Session>> _sessions;
+    // 裸指针仅作为 O(1) 反向索引键；真正连接身份仍由 Session weak_ptr 校验。
+    std::unordered_map<const muduo::net::TcpConnection*, UserId> _byConnection;
     SessionId _nextSessionId = 1;
 };
 

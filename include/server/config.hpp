@@ -20,6 +20,7 @@ public:
     uint16_t getServerPort() const;
     int getThreadNum() const;
     string getServerName() const;
+    string getNodeId() const;
 
     // mysql
     string getMySQLHost() const;

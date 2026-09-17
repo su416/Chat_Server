@@ -32,6 +32,7 @@ bool Config::load(const string& filename)
         _configMap["server.port"] = to_string(js["server"]["port"].get<int>());
         _configMap["server.thread_num"] = to_string(js["server"]["thread_num"].get<int>());
         _configMap["server.name"] = js["server"]["name"];
+        _configMap["server.node_id"] = js["server"].at("node_id").get<string>();
 
         // mysql
         _configMap["mysql.host"] = js["mysql"]["host"];
@@ -89,6 +90,11 @@ int Config::getThreadNum() const
 string Config::getServerName() const
 {
     return _configMap.at("server.name");
+}
+
+string Config::getNodeId() const
+{
+    return _configMap.at("server.node_id");
 }
 
 // mysql

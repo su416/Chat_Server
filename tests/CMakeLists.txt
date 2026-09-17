@@ -89,6 +89,17 @@ target_link_libraries(test_message_router
     ${Protobuf_LIBRARIES}
 )
 
+add_executable(test_cluster
+    test_cluster.cpp
+    ${PROJECT_SOURCE_DIR}/src/server/cluster/presence_manager.cpp
+    ${PROJECT_SOURCE_DIR}/src/server/cluster/route_transport.cpp
+    ${PROJECT_SOURCE_DIR}/src/server/redis/redis.cpp
+    ${PROJECT_SOURCE_DIR}/src/server/config.cpp
+)
+target_compile_definitions(test_cluster PRIVATE
+    CHAT_TEST_CONFIG="${PROJECT_SOURCE_DIR}/conf/chatserver.json")
+target_link_libraries(test_cluster ${COMMON_LIBS} hiredis muduo_base pthread)
+
 # --- Qt Model 测试（需要 Qt6::Core） ---
 
 find_package(Qt6 QUIET COMPONENTS Core)
@@ -108,7 +119,7 @@ endif()
 
 # --- 注册到 CTest ---
 enable_testing()
-foreach(test_name test_rate_limiter test_jsoncodec test_protocodec test_password_utils test_session_manager test_message_decoder test_message_router test_pending_delivery_manager test_friendlistmodel)
+foreach(test_name test_rate_limiter test_jsoncodec test_protocodec test_password_utils test_session_manager test_message_decoder test_message_router test_pending_delivery_manager test_friendlistmodel test_cluster)
     if(TARGET ${test_name})
         add_test(NAME ${test_name} COMMAND $<TARGET_FILE:${test_name}>)
     endif()

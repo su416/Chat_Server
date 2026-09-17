@@ -1,245 +1,218 @@
 #include "redis.hpp"
 #include "config.hpp"
+
 #include <muduo/base/Logging.h>
 #include <chrono>
-#include <thread>
-#include <iostream>
-using namespace std;
+#include <ctime>
+#include <sys/socket.h>
 
-Redis::Redis()
+namespace {
+RedisContextPtr makeContext()
 {
+    const auto& config = Config::instance();
+    timeval timeout{1, 0};
+    return RedisContextPtr(redisConnectWithTimeout(
+        config.getRedisHost().c_str(), config.getRedisPort(), timeout));
+}
 }
 
+Redis::~Redis()
+{
+    stop();
+}
 
+void Redis::stop()
+{
+    {
+        std::lock_guard<std::mutex> lock(_observerMutex);
+        _stopping = true;
+        if (_subscriberFd >= 0) ::shutdown(_subscriberFd, SHUT_RDWR);
+    }
+    if (_observer.joinable()) _observer.join();
+}
+
+bool Redis::connectCommandLocked()
+{
+    _commandContext = makeContext();
+    if (!_commandContext || _commandContext->err)
+    {
+        LOG_ERROR << "Redis command connection unavailable";
+        return false;
+    }
+    redisSetTimeout(_commandContext.get(), timeval{1, 0});
+    return true;
+}
 
 bool Redis::connect()
 {
-    string host = Config::instance().getRedisHost();
-    uint16_t port = Config::instance().getRedisPort();
-
-    // 负责 publish 发布消息的上下文连接
-    _publish_context.reset(redisConnect(host.c_str(), port));
-    if (!_publish_context)
-    {
-        LOG_ERROR << "connect redis failed! host=" << host << " port=" << port;
-        return false;
-    }
-
-    // 负责 subscribe 订阅消息的上下文连接
-    _subcribe_context.reset(redisConnect(host.c_str(), port));
-    if (!_subcribe_context)
-    {
-        LOG_ERROR << "connect redis failed! host=" << host << " port=" << port;
-        return false;
-    }
-
-    // 在单独的线程中，监听通道上的事件，有消息给业务层进行上报
-    thread t([&]() {
-        observer_channel_message();
-    });
-    t.detach();
-
-    LOG_INFO << "connect redis-server success! host=" << host << " port=" << port;
-
-    return true;
+    std::lock_guard<std::mutex> lock(_commandMutex);
+    return connectCommandLocked();
 }
 
-// 检查 Redis 连接状态
 bool Redis::isConnected() const
 {
-    return _publish_context && _publish_context->err == REDIS_OK;
+    std::lock_guard<std::mutex> lock(_commandMutex);
+    return _commandContext && !_commandContext->err;
 }
 
-// 向redis指定的通道channel发布消息
-bool Redis::publish(int channel, string message)
+RedisReplyPtr Redis::command(const std::vector<std::string>& args)
 {
-    if (!isConnected())
+    if (args.empty()) return {};
+    std::lock_guard<std::mutex> lock(_commandMutex);
+    if ((!_commandContext || _commandContext->err) && !connectCommandLocked()) return {};
+    std::vector<const char*> argv;
+    std::vector<size_t> lengths;
+    argv.reserve(args.size());
+    lengths.reserve(args.size());
+    for (const auto& arg : args)
     {
-        LOG_ERROR << "redis publish skipped: not connected";
-        return false;
+        argv.push_back(arg.data());
+        lengths.push_back(arg.size());
     }
-
-    redisReply *reply = (redisReply *)redisCommand(_publish_context.get(), "PUBLISH %d %s", channel, message.c_str());
-    if (nullptr == reply)
-    {
-        LOG_ERROR << "publish command failed!";
-        return false;
-    }
-    freeReplyObject(reply);
-    return true;
+    RedisReplyPtr reply(static_cast<redisReply*>(redisCommandArgv(
+        _commandContext.get(), static_cast<int>(argv.size()), argv.data(), lengths.data())));
+    if (!reply) LOG_ERROR << "Redis command failed: " << args.front();
+    else if (reply->type == REDIS_REPLY_ERROR) LOG_ERROR << "Redis error: " << reply->str;
+    return reply;
 }
 
-// 向redis指定的通道subscribe订阅消息
-bool Redis::subscribe(int channel)
+std::vector<RedisReplyPtr> Redis::batch(
+    const std::vector<std::vector<std::string>>& commands)
 {
-    lock_guard<mutex> lock(_subscribeMutex);
-
-    if (!_subcribe_context)
+    std::vector<RedisReplyPtr> replies;
+    if (commands.empty()) return replies;
+    std::lock_guard<std::mutex> lock(_commandMutex);
+    if ((!_commandContext || _commandContext->err) && !connectCommandLocked()) return {};
+    for (const auto& args : commands)
     {
-        LOG_ERROR << "redis subscribe skipped: not connected";
-        return false;
-    }
-
-    if (REDIS_ERR == redisAppendCommand(this->_subcribe_context.get(), "SUBSCRIBE %d", channel))
-    {
-        LOG_ERROR << "subscribe command failed!";
-        return false;
-    }
-    int done = 0;
-    while (!done)
-    {
-        if (REDIS_ERR == redisBufferWrite(this->_subcribe_context.get(), &done))
+        std::vector<const char*> argv;
+        std::vector<size_t> lengths;
+        argv.reserve(args.size());
+        lengths.reserve(args.size());
+        for (const auto& arg : args)
         {
-            LOG_ERROR << "subscribe command failed!";
-            return false;
+            argv.push_back(arg.data());
+            lengths.push_back(arg.size());
         }
+        if (argv.empty() || redisAppendCommandArgv(_commandContext.get(),
+                static_cast<int>(argv.size()), argv.data(), lengths.data()) != REDIS_OK)
+            return {};
     }
-    return true;
+    replies.reserve(commands.size());
+    for (std::size_t index = 0; index < commands.size(); ++index)
+    {
+        redisReply* raw = nullptr;
+        if (redisGetReply(_commandContext.get(), reinterpret_cast<void**>(&raw)) != REDIS_OK)
+            return {};
+        replies.emplace_back(raw);
+    }
+    return replies;
 }
 
-// 向redis指定的通道unsubscribe取消订阅消息
-bool Redis::unsubscribe(int channel)
+bool Redis::publish(const std::string& channel, const std::string& message)
 {
-    lock_guard<mutex> lock(_subscribeMutex);
-
-    if (!_subcribe_context)
-    {
-        return false;
-    }
-
-    if (REDIS_ERR == redisAppendCommand(this->_subcribe_context.get(), "UNSUBSCRIBE %d", channel))
-    {
-        LOG_ERROR << "unsubscribe command failed!";
-        return false;
-    }
-    int done = 0;
-    while (!done)
-    {
-        if (REDIS_ERR == redisBufferWrite(this->_subcribe_context.get(), &done))
-        {
-            LOG_ERROR << "unsubscribe command failed!";
-            return false;
-        }
-    }
-    return true;
+    auto reply = command({"PUBLISH", channel, message});
+    // 0 listeners means no node accepted this ephemeral route.
+    return reply && reply->type == REDIS_REPLY_INTEGER && reply->integer > 0;
 }
 
-// 在独立线程中接收订阅通道中的消息（断线自动重连）
-void Redis::observer_channel_message()
+bool Redis::subscribeNode(const std::string& channel,
+                          std::function<void(const std::string&)> handler)
+{
+    {
+        std::lock_guard<std::mutex> lock(_observerMutex);
+        if (_observer.joinable() || channel.empty() || !handler) return false;
+        _channel = channel;
+        _handler = std::move(handler);
+    }
+    _observer = std::thread(&Redis::observe, this);
+    std::unique_lock<std::mutex> lock(_observerMutex);
+    return _observerReady.wait_for(lock, std::chrono::seconds(3),
+                                   [this] { return _subscribed; });
+}
+
+void Redis::observe()
 {
     while (true)
     {
-        redisReply *reply = nullptr;
-        while (_subcribe_context &&
-               REDIS_OK == redisGetReply(this->_subcribe_context.get(), (void **)&reply))
         {
-            if (reply != nullptr
-                && reply->type == REDIS_REPLY_ARRAY
-                && reply->elements >= 3
-                && reply->element[1] != nullptr && reply->element[1]->str != nullptr
-                && reply->element[2] != nullptr && reply->element[2]->str != nullptr)
+            std::lock_guard<std::mutex> lock(_observerMutex);
+            if (_stopping) return;
+            _subscribed = false;
+        }
+        auto context = makeContext();
+        if (context && !context->err)
+        {
             {
-                _notify_message_handler(atoi(reply->element[1]->str),
-                                        reply->element[2]->str);
+                std::lock_guard<std::mutex> lock(_observerMutex);
+                _subscriberFd = context->fd;
             }
-            freeReplyObject(reply);
+            RedisReplyPtr subscribed(static_cast<redisReply*>(
+                redisCommand(context.get(), "SUBSCRIBE %s", _channel.c_str())));
+            if (subscribed && subscribed->type == REDIS_REPLY_ARRAY)
+            {
+                {
+                    std::lock_guard<std::mutex> lock(_observerMutex);
+                    _subscribed = true;
+                }
+                _observerReady.notify_all();
+                while (true)
+                {
+                    {
+                        std::lock_guard<std::mutex> lock(_observerMutex);
+                        if (_stopping) return;
+                    }
+                    redisReply* raw = nullptr;
+                    if (redisGetReply(context.get(), reinterpret_cast<void**>(&raw)) != REDIS_OK)
+                        break;
+                    RedisReplyPtr reply(raw);
+                    if (reply && reply->type == REDIS_REPLY_ARRAY && reply->elements == 3 &&
+                        reply->element[0] && reply->element[0]->str &&
+                        std::string(reply->element[0]->str) == "message" &&
+                        reply->element[2] && reply->element[2]->str)
+                    {
+                        try {
+                            _handler(std::string(reply->element[2]->str, reply->element[2]->len));
+                        } catch (const std::exception& error) {
+                            LOG_ERROR << "Redis routed callback rejected: " << error.what();
+                        }
+                    }
+                }
+            }
         }
-
-        LOG_ERROR << "redis observer lost connection, retrying in 3s...";
-
-        // 等待后尝试重连
-        this_thread::sleep_for(chrono::seconds(3));
-        if (!reconnect())
         {
-            LOG_ERROR << "redis reconnect failed, retrying in 3s...";
-            continue;
+            std::lock_guard<std::mutex> lock(_observerMutex);
+            _subscriberFd = -1;
         }
-        LOG_INFO << "redis observer reconnected";
-
-        // 重连成功后触发回调，批量恢复订阅（消除消息丢失窗口）
-        if (_onReconnect)
-        {
-            _onReconnect();
-        }                
+        LOG_WARN << "Redis node subscriber disconnected; retrying";
+        std::this_thread::sleep_for(std::chrono::seconds(1));
     }
 }
 
-bool Redis::reconnect()
+bool Redis::registerServer(const std::string& name, const std::string& host, int port)
 {
-    string host = Config::instance().getRedisHost();
-    uint16_t port = Config::instance().getRedisPort();
-
-    // 释放旧连接（unique_ptr::reset 自动调 RedisContextDeleter）
-    _subcribe_context.reset();
-    _publish_context.reset();
-
-    // 重建两个上下文
-    _publish_context.reset(redisConnect(host.c_str(), port));
-    if (!_publish_context || _publish_context->err)
-        return false;
-
-    _subcribe_context.reset(redisConnect(host.c_str(), port));
-    if (!_subcribe_context || _subcribe_context->err)
-        return false;
-
-    return true;
+    const std::string value = "{\"host\":\"" + host + "\",\"port\":" +
+        std::to_string(port) + ",\"connections\":0,\"updated_at\":" +
+        std::to_string(std::time(nullptr)) + "}";
+    auto reply = command({"HSET", "chatservers", name, value});
+    return reply && reply->type == REDIS_REPLY_INTEGER;
 }
 
-void Redis::init_notify_handler(function<void(int,string)> fn)
+bool Redis::updateConnections(const std::string& name, int count)
 {
-    this->_notify_message_handler = fn;
-}
-
-void Redis::setReconnectHandler(function<void()> fn)
-{
-    _onReconnect = std::move(fn);
-}
-
-bool Redis::registerServer(const string& name, const string& host, int port)
-{
-    if (!isConnected()) return false;
-
-    string json = "{\"host\":\"" + host + "\",\"port\":" + to_string(port)
-                + ",\"connections\":0,\"updated_at\":\"" +
-                to_string(time(nullptr)) + "\"}";
-
-    auto* reply = (redisReply*)redisCommand(_publish_context.get(),
-        "HSET chatservers %s %s", name.c_str(), json.c_str());
-    if (!reply) return false;
-    freeReplyObject(reply);
-    return true;
-}
-
-bool Redis::updateConnections(const string& name, int count)
-{
-    if (!isConnected()) return false;
-
-    // 先读当前 JSON，更新 connections 字段，再写回
-    auto* reply = (redisReply*)redisCommand(_publish_context.get(),
-        "HGET chatservers %s", name.c_str());
-    if (!reply || reply->type != REDIS_REPLY_STRING) {
-        if (reply) freeReplyObject(reply);
-        return false;
-    }
-
-    string json(reply->str);
-    freeReplyObject(reply);
-
-    // 简单字符串替换：更新 connections 和 updated_at
-    auto updateField = [](string& s, const string& key, const string& val) {
-        auto pos = s.find("\"" + key + "\":");
-        if (pos == string::npos) return;
-        auto start = s.find_first_of("0123456789", pos + key.size() + 3);
-        auto end = s.find_first_not_of("0123456789", start);
-        if (start != string::npos && end != string::npos)
-            s.replace(start, end - start, val);
+    auto reply = command({"HGET", "chatservers", name});
+    if (!reply || reply->type != REDIS_REPLY_STRING) return false;
+    std::string value(reply->str, reply->len);
+    auto replaceNumber = [&](const std::string& key, const std::string& number) {
+        const auto pos = value.find("\"" + key + "\":");
+        if (pos == std::string::npos) return;
+        const auto begin = value.find_first_of("0123456789", pos + key.size() + 3);
+        if (begin == std::string::npos) return;
+        const auto end = value.find_first_not_of("0123456789", begin);
+        value.replace(begin, end == std::string::npos ? std::string::npos : end - begin, number);
     };
-    updateField(json, "connections", to_string(count));
-    updateField(json, "updated_at", to_string(time(nullptr)));
-
-    reply = (redisReply*)redisCommand(_publish_context.get(),
-        "HSET chatservers %s %s", name.c_str(), json.c_str());
-    if (!reply) return false;
-    freeReplyObject(reply);
-    return true;
+    replaceNumber("connections", std::to_string(count));
+    replaceNumber("updated_at", std::to_string(std::time(nullptr)));
+    reply = command({"HSET", "chatservers", name, value});
+    return reply && reply->type == REDIS_REPLY_INTEGER;
 }

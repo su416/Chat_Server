@@ -29,6 +29,7 @@ public:
           _userId(userId),
           _state(SessionState::Authenticated),
           _connection(connection),
+          _connectionKey(connection.get()),
           _createdAt(std::chrono::steady_clock::now())
     {
     }
@@ -43,6 +44,7 @@ public:
     }
 
     bool expired() const noexcept { return _connection.expired(); }
+    const muduo::net::TcpConnection* connectionKey() const noexcept { return _connectionKey; }
 
     std::chrono::steady_clock::time_point createdAt() const noexcept
     {
@@ -54,6 +56,7 @@ private:
     const UserId _userId;
     const SessionState _state;
     const std::weak_ptr<muduo::net::TcpConnection> _connection;
+    const muduo::net::TcpConnection* const _connectionKey;
     const std::chrono::steady_clock::time_point _createdAt;
 };
 

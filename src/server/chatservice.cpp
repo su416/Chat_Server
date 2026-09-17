@@ -21,18 +21,6 @@ void sendTcpJson(const TcpConnectionPtr &conn, const json &js)
     ChatServer::sendResponse(conn, js);
 }
 
-void sendTcpRaw(const TcpConnectionPtr &conn, const std::string &payload)
-{
-    // Redis 内部仍传 JSON；到客户端时按该连接的 wire protocol 重新编码。
-    try
-    {
-        ChatServer::sendResponse(conn, json::parse(payload));
-    }
-    catch (const std::exception& error)
-    {
-        LOG_WARN << "invalid internal Redis message: " << error.what();
-    }
-}
 }
 
 // 获取单例对象的接口函数
@@ -44,6 +32,8 @@ ChatService *ChatService::instance()
 
 // 注册消息以及对应的Handler回调操作
 ChatService::ChatService()
+    : _presence(_redis, Config::instance().getNodeId()),
+      _route(_redis, Config::instance().getNodeId())
 {
     // 协议协商（msgid=0）——客户端声明偏好，服务端确认
     _msgHandlerMap.insert({NEGOTIATE_MSG, std::bind(&ChatService::negotiate, this, _1, _2, _3)});
@@ -65,28 +55,24 @@ ChatService::ChatService()
     _msgHandlerMap.insert({QUERY_ONE_CHAT_HISTORY_MSG, std::bind(&ChatService::queryOneChatHistory, this, _1, _2, _3)});
     _msgHandlerMap.insert({QUERY_GROUP_CHAT_HISTORY_MSG, std::bind(&ChatService::queryGroupChatHistory, this, _1, _2, _3)});
 
-    // 连接redis服务器
-    if (_redis.connect())
-    {
-        // 设置上报消息的回调
-        _redis.init_notify_handler(std::bind(&ChatService::handleRedisSubscribeMessage, this, _1, _2));
-
-        // 设置重连后回调：批量恢复所有在线用户的订阅，消除消息丢失窗口
-        _redis.setReconnectHandler([this]() {
-            const auto userIds = _sessionManager.activeUserIds();
-            for (int userid : userIds)
-            {
-                _redis.subscribe(userid);
-            }
-        });
-    }
+    if (!_redis.connect()) LOG_ERROR << "Redis unavailable at startup";
+    if (!_presence.registerNode()) LOG_ERROR << "NODE_REGISTER failed";
+    if (!_route.start([this](cluster::RoutedMessage message) {
+            handleRoutedMessage(std::move(message));
+        })) LOG_ERROR << "ROUTE_SUBSCRIBE failed";
 }
 
 // 服务器异常，业务重置方法
 void ChatService::reset()
 {
-    // 把online状态的用户，设置成offline
-    _userModel.resetState();
+    _mainLoop.store(nullptr);
+    for (const auto& [userId, sessionId] : _sessionManager.activeSessions())
+    {
+        if (_presence.unbindUser(userId, sessionId))
+            _userModel.updateState(User(userId, "", "", "offline"));
+    }
+    _presence.unregisterNode();
+    _redis.stop();
 }
 
 // 获取消息对应的处理器；未知类型由 MessageRouter 显式处理。
@@ -157,16 +143,7 @@ void ChatService::login(const TcpConnectionPtr &conn, json &js, Timestamp time)
     User user = _userModel.query(id);
     if (user.getId() == id && PasswordUtils::verifyPassword(pwd, user.getPwd()))
     {
-        if (user.getState() == "online")
-        {
-            // 该用户已经登录，不允许重复登录
-            json response;
-            response["msgid"] = LOGIN_MSG_ACK;
-            response["errno"] = 2;
-            response["errmsg"] = "this account is using, input another!";
-            sendTcpJson(conn, response);
-        }
-        else
+        // MySQL state 是展示缓存，不是跨节点登录仲裁；Redis bind 是 last-login-wins。
         {
             // 登录成功，绑定逻辑会话。并发登录时只允许第一个绑定成功。
             auto bindOutcome = _sessionManager.bind(id, conn);
@@ -180,10 +157,14 @@ void ChatService::login(const TcpConnectionPtr &conn, json &js, Timestamp time)
                 return;
             }
 
+            if (!_presence.bindUser(id, bindOutcome.sessionId))
+            {
+                _sessionManager.unbindUser(id, conn);
+                sendTcpJson(conn, json{{"msgid", LOGIN_MSG_ACK}, {"errno", 6},
+                                       {"errmsg", "presence unavailable"}});
+                return;
+            }
             syncServerConnections();
-
-            // id用户登录成功后，向redis订阅channel(id)
-            _redis.subscribe(id);
 
             // 登录成功，更新用户状态信息 state offline=>online
             user.setState("online");
@@ -296,6 +277,8 @@ void ChatService::reg(const TcpConnectionPtr &conn, json &js, Timestamp time)
 void ChatService::loginout(const TcpConnectionPtr &conn, json &js, Timestamp time)
 {
     int userid = js["id"].get<int>();
+    auto session = _sessionManager.sessionForConnection(conn);
+    if (!session || session->userId() != userid) return;
 
     // 只允许当前会话对应的连接解绑；旧连接的迟到请求不能删除新会话。
     if (!_sessionManager.unbindUser(userid, conn))
@@ -309,12 +292,9 @@ void ChatService::loginout(const TcpConnectionPtr &conn, json &js, Timestamp tim
 
     syncServerConnections();
 
-    // 用户注销，相当于就是下线，在redis中取消订阅通道
-    _redis.unsubscribe(userid);
-
-    // 更新用户的状态信息
-    User user(userid, "", "", "offline");
-    _userModel.updateState(user);
+    // 旧节点迟到 logout 不得删除新节点 owner，也不得把 MySQL 展示状态写离线。
+    if (_presence.unbindUser(userid, session->id()))
+        _userModel.updateState(User(userid, "", "", "offline"));
 }
 
 // 处理客户端异常退出
@@ -323,6 +303,7 @@ void ChatService::clientCloseException(const TcpConnectionPtr &conn)
     const auto cancelled = _pendingDeliveries.cancelConnection(conn);
     if (cancelled)
         LOG_WARN << "DELIVERY_FAILED disconnected session count=" << cancelled;
+    auto session = _sessionManager.sessionForConnection(conn);
     auto userId = _sessionManager.unbindConnection(conn);
     if (!userId)
     {
@@ -332,12 +313,8 @@ void ChatService::clientCloseException(const TcpConnectionPtr &conn)
 
     syncServerConnections();
 
-    // 用户注销，相当于就是下线，在redis中取消订阅通道
-    _redis.unsubscribe(*userId);
-
-    // 更新用户的状态信息
-    User user(*userId, "", "", "offline");
-    _userModel.updateState(user);
+    if (session && _presence.unbindUser(*userId, session->id()))
+        _userModel.updateState(User(*userId, "", "", "offline"));
 }
 
 // 一对一聊天业务
@@ -348,6 +325,16 @@ void ChatService::oneChat(const TcpConnectionPtr &conn, json &js, Timestamp time
     int fromid = js["id"].get<int>();
     int toid = js["toid"].get<int>();
     string msg = js["msg"];
+
+    auto senderSession = _sessionManager.sessionForConnection(conn);
+    if (!senderSession || senderSession->userId() != fromid ||
+        !_presence.ownsUser(fromid, senderSession->id()))
+    {
+        ++_routeStale;
+        sendTcpJson(conn, json{{"msgid", ONE_CHAT_MSG_ACK}, {"errno", 6},
+                               {"errmsg", "sender is not current owner"}});
+        return;
+    }
 
     // 限流检查
     if (!RateLimiter::instance()->allow(fromid))
@@ -371,8 +358,10 @@ void ChatService::oneChat(const TcpConnectionPtr &conn, json &js, Timestamp time
 
     if (auto session = _sessionManager.sessionForUser(toid))
     {
-        if (auto targetConnection = session->connection())
+        if (auto targetConnection = session->connection();
+            targetConnection && _presence.ownsUser(toid, session->id()))
         {
+            ++_routeLocal;
             // 在目标连接的 I/O loop 读取 ProtocolState，避免跨线程访问 context。
             // 旧 Binary 接收端没有 ACK 能力，保留 Phase 2 原投递行为。
             std::weak_ptr<const gateway::Session> weakSession = session;
@@ -385,7 +374,8 @@ void ChatService::oneChat(const TcpConnectionPtr &conn, json &js, Timestamp time
                     auto currentSession = weakSession.lock();
                     auto target = weakTarget.lock();
                     if (!currentSession || !target || !target->connected() ||
-                        _sessionManager.sessionForUser(toid) != currentSession)
+                        _sessionManager.sessionForUser(toid) != currentSession ||
+                        !_presence.ownsUser(toid, currentSession->id()))
                     {
                         if (auto sender = weakSender.lock())
                         {
@@ -430,25 +420,11 @@ void ChatService::oneChat(const TcpConnectionPtr &conn, json &js, Timestamp time
 
     recordHistory();
 
-    // 查询 toid 是否在线
-    User user = _userModel.query(toid);
-    if (user.getState() == "online")
-    {
-        if (_redis.publish(toid, js.dump()))
-        {
-            return;
-        }
-        // Redis 不可用，降级为本地离线存储
-        LOG_ERROR << "redis publish failed, fallback to offline storage";
-    }
-
-    // toid 不在线（或 Redis 不可用），异步存储离线消息到 chatmessage
-    {
-        string msgDump = js.dump();
-        DBThreadPool::instance()->submitVoid([this, fromid, toid, msgDump]() {
-            _chatHistoryModel.insertOneChat(fromid, toid, msgDump, 2);
-        });
-    }
+    const auto status = routeToUser(toid, fromid, ONE_CHAT_MSG, js);
+    if (status == RouteStatus::Offline) storeOffline(fromid, toid, js);
+    else if (status == RouteStatus::Error)
+        sendTcpJson(conn, json{{"msgid", ONE_CHAT_MSG_ACK}, {"errno", 6},
+                               {"errmsg", "cross-node route unavailable"}});
 }
 
 // 添加好友业务
@@ -456,6 +432,16 @@ void ChatService::addFriend(const TcpConnectionPtr &conn, json &js, Timestamp ti
 {
     int userid = js["id"].get<int>();
     int friendid = js["friendid"].get<int>();
+
+    auto sender = _sessionManager.sessionForConnection(conn);
+    if (!sender || sender->userId() != userid ||
+        !_presence.ownsUser(userid, sender->id()))
+    {
+        ++_routeStale;
+        sendTcpJson(conn, json{{"msgid", ADD_FRIEND_MSG_ACK}, {"errno", 6},
+                               {"errmsg", "sender is not current owner"}});
+        return;
+    }
 
     json response;
     response["msgid"] = ADD_FRIEND_MSG_ACK;
@@ -506,17 +492,13 @@ void ChatService::addFriend(const TcpConnectionPtr &conn, json &js, Timestamp ti
         notify["state"] = selfUser.getState();
 
         // 本地在线 → 直接推送
-        if (auto friendConnection = _sessionManager.connectionForUser(friendid))
+        if (auto friendSession = _sessionManager.sessionForUser(friendid);
+            friendSession && _presence.ownsUser(friendid, friendSession->id()))
         {
-            sendTcpJson(friendConnection, notify);
+            sendTcpJson(friendSession->connection(), notify);
             return;
         }
-
-        // 跨服在线 → Redis 推送
-        if (friendUser.getState() == "online")
-        {
-            _redis.publish(friendid, notify.dump());
-        }
+        routeToUser(friendid, userid, ADD_FRIEND_MSG_ACK, notify);
     }
 }
 
@@ -626,6 +608,16 @@ void ChatService::groupChat(const TcpConnectionPtr &conn, json &js, Timestamp ti
     int groupid = js["groupid"].get<int>();
     string msg = js["msg"];
 
+    auto sender = _sessionManager.sessionForConnection(conn);
+    if (!sender || sender->userId() != userid ||
+        !_presence.ownsUser(userid, sender->id()))
+    {
+        ++_routeStale;
+        sendTcpJson(conn, json{{"msgid", GROUP_CHAT_MSG_ACK}, {"errno", 6},
+                               {"errmsg", "sender is not current owner"}});
+        return;
+    }
+
     // 限流检查
     if (!RateLimiter::instance()->allow(userid))
     {
@@ -648,59 +640,158 @@ void ChatService::groupChat(const TcpConnectionPtr &conn, json &js, Timestamp ti
 
     vector<int> useridVec = _groupModel.queryGroupUsers(userid, groupid);
 
-    // 获取路由快照，收集本地在线连接和非本地用户 ID。
-    vector<int> offlineIds;
-    vector<TcpConnectionPtr> onlineConns =
-        _sessionManager.connectionsForUsers(useridVec, offlineIds);
-    // SessionManager 锁已释放，下面的网络和 DB 操作不会阻塞会话读写。
-
-    // 转发给在线成员
-    for (auto &c : onlineConns)
+    for (int id : useridVec)
     {
-        sendTcpJson(c, js);
-    }
-
-    // 处理离线成员：一次批量查询所有状态（消除 N+1）
-    if (!offlineIds.empty())
-    {
-        auto stateMap = _userModel.queryStates(offlineIds);
-        for (int id : offlineIds)
+        if (auto session = _sessionManager.sessionForUser(id);
+            session && _presence.ownsUser(id, session->id()))
         {
-            string state = stateMap[id];
-            if (state == "online")
-            {
-                if (!_redis.publish(id, js.dump()))
-                {
-                    // Redis 不可用，降级为本地离线存储（异步）
-                    string msgDump = js.dump();
-                    DBThreadPool::instance()->submitVoid([this, userid, id, msgDump]() {
-                        _chatHistoryModel.insertOneChat(userid, id, msgDump, 2);
-                    });
-                }
-            }
-            else
-            {
-                // 异步存储离线群消息到 chatmessage（toid=接收者）
-                string msgDump = js.dump();
-                DBThreadPool::instance()->submitVoid([this, userid, id, msgDump]() {
-                    _chatHistoryModel.insertOneChat(userid, id, msgDump, 2);
-                });
-            }
+            if (auto target = session->connection()) sendTcpJson(target, js);
+            continue;
         }
+        const auto status = routeToUser(id, userid, GROUP_CHAT_MSG, js);
+        if (status == RouteStatus::Offline) storeOffline(userid, id, js);
     }
 }
 
-// 从redis消息队列中获取订阅的消息
-void ChatService::handleRedisSubscribeMessage(int userid, string msg)
+ChatService::RouteStatus ChatService::routeToUser(
+    int receiverId, int senderId, int messageType, const json& payload)
 {
-    if (auto targetConnection = _sessionManager.connectionForUser(userid))
+    auto found = _presence.lookupUser(receiverId);
+    if (found.status == cluster::LookupStatus::Error)
     {
-        sendTcpRaw(targetConnection, msg);
+        ++_routeFailed;
+        LOG_ERROR << "ROUTE_FAILED presence lookup user=" << receiverId;
+        return RouteStatus::Error;
+    }
+    if (found.status == cluster::LookupStatus::Miss) return RouteStatus::Offline;
+    if (found.owner.nodeId == _presence.nodeId())
+    {
+        // Local Session vanished after a prior snapshot. This owner is not deliverable.
+        if (_sessionManager.sessionForUser(receiverId)) return RouteStatus::Error;
+        _presence.unbindUser(receiverId, found.owner.sessionId);
+        return RouteStatus::Offline;
+    }
+    cluster::RoutedMessage route;
+    route.routeId = _route.nextRouteId();
+    route.sourceNode = _presence.nodeId();
+    route.targetNode = found.owner.nodeId;
+    route.messageType = messageType;
+    route.senderUserId = senderId;
+    route.receiverUserId = receiverId;
+    route.payload = payload;
+    if (!_route.send(route))
+    {
+        ++_routeFailed;
+        LOG_ERROR << "ROUTE_FAILED publish route=" << route.routeId
+                  << " target=" << route.targetNode;
+        return RouteStatus::Error;
+    }
+    ++_routeRemote;
+    LOG_INFO << "ROUTE_REMOTE id=" << route.routeId << " target=" << route.targetNode;
+    return RouteStatus::Sent;
+}
+
+void ChatService::storeOffline(int senderId, int receiverId, const json& payload)
+{
+    const auto encoded = payload.dump();
+    DBThreadPool::instance()->submitVoid([this, senderId, receiverId, encoded]() {
+        _chatHistoryModel.insertOneChat(senderId, receiverId, encoded, 2);
+    });
+}
+
+void ChatService::handleRoutedMessage(cluster::RoutedMessage message)
+{
+    ++_routeReceived;
+    if (message.targetNode != _presence.nodeId() ||
+        !message.payload.contains("msgid") ||
+        !message.payload["msgid"].is_number_integer() ||
+        message.payload["msgid"].get<int>() != message.messageType ||
+        (message.messageType == ONE_CHAT_MSG &&
+         (!message.payload.contains("toid") ||
+          !message.payload["toid"].is_number_integer() ||
+          message.payload["toid"].get<int>() != message.receiverUserId)))
+    {
+        ++_routeFailed;
+        LOG_WARN << "ROUTE_FAILED malformed target=" << message.targetNode;
         return;
     }
+    // Subscriber thread only parses, validates and locates a Session; all further
+    // owner checks/encoding occur on a Muduo loop, never against foreign context.
+    auto session = _sessionManager.sessionForUser(message.receiverUserId);
+    auto connection = session ? session->connection() : nullptr;
+    auto* loop = connection ? connection->getLoop() : _mainLoop.load();
+    if (!loop) { ++_routeFailed; return; }
+    loop->queueInLoop([this, message = std::move(message)]() mutable {
+        processRoutedMessage(std::move(message));
+    });
+}
 
-    // 存储该用户的离线消息到 chatmessage
-    _chatHistoryModel.insertOneChat(0, userid, msg, 2);
+void ChatService::processRoutedMessage(cluster::RoutedMessage message)
+{
+    auto owner = _presence.lookupUser(message.receiverUserId);
+    auto session = _sessionManager.sessionForUser(message.receiverUserId);
+    if (owner.status == cluster::LookupStatus::Hit &&
+        owner.owner.nodeId == _presence.nodeId() && session &&
+        owner.owner.sessionId == session->id() &&
+        _presence.ownsUser(message.receiverUserId, session->id()))
+    {
+        if (message.messageType == ONE_CHAT_MSG)
+            deliverRoutedOneChat(session, message.payload);
+        else if (auto target = session->connection())
+            ChatServer::sendResponse(target, message.payload);
+        return;
+    }
+    ++_routeStale;
+    LOG_WARN << "ROUTE_STALE id=" << message.routeId
+             << " user=" << message.receiverUserId;
+    if (owner.status == cluster::LookupStatus::Hit &&
+        owner.owner.nodeId != _presence.nodeId() && message.hops == 0)
+    {
+        message.targetNode = owner.owner.nodeId;
+        message.hops = 1;
+        if (_route.send(message)) { ++_routeRemote; return; }
+    }
+    // Pub/Sub has no server-to-server ACK. A stale route cannot claim delivery.
+    ++_routeFailed;
+}
+
+void ChatService::deliverRoutedOneChat(
+    const std::shared_ptr<const gateway::Session>& session, const json& payload)
+{
+    auto target = session ? session->connection() : nullptr;
+    if (!target || !target->connected()) { ++_routeFailed; return; }
+    if (target->getLoop() != muduo::net::EventLoop::getEventLoopOfCurrentThread())
+    {
+        std::weak_ptr<const gateway::Session> weak = session;
+        target->getLoop()->queueInLoop([this, weak, payload]() {
+            if (auto current = weak.lock()) deliverRoutedOneChat(current, payload);
+        });
+        return;
+    }
+    if (_sessionManager.sessionForUser(session->userId()) != session ||
+        !_presence.ownsUser(session->userId(), session->id()))
+    {
+        ++_routeStale;
+        return;
+    }
+    const auto* state = boost::any_cast<protocol::ProtocolState>(&target->getContext());
+    if (state && state->selected() == protocol::WireProtocol::Binary)
+    {
+        ChatServer::sendResponse(target, payload);
+        return;
+    }
+    const auto deliveryId = _pendingDeliveries.nextDeliveryId();
+    gateway::MessageEnvelope delivery(ONE_CHAT_MSG, payload,
+                                      protocol::WireProtocol::Undetermined, deliveryId);
+    if (!_pendingDeliveries.track(session, delivery))
+    {
+        ++_routeFailed;
+        LOG_WARN << "ROUTE_FAILED pending capacity user=" << session->userId();
+        return;
+    }
+    LOG_INFO << "ROUTE_DELIVERY route_target=" << _presence.nodeId()
+             << " delivery_id=" << deliveryId;
+    ChatServer::sendResponse(target, delivery);
 }
 
 // 查询单聊历史消息
@@ -788,11 +879,39 @@ void ChatService::scanReliableDeliveries()
         auto connection = session->connection();
         if (!connection || !connection->connected())
             continue;
+        if (!_presence.ownsUser(retry.receiverId, session->id()))
+        {
+            _pendingDeliveries.cancelConnection(connection);
+            continue;
+        }
         LOG_DEBUG << "DELIVERY_TIMEOUT id=" << *retry.envelope.deliveryId();
         LOG_DEBUG << "DELIVERY_RETRY id=" << *retry.envelope.deliveryId()
                   << " count=" << retry.retryCount;
         ChatServer::sendResponse(connection, retry.envelope);
     }
+}
+
+void ChatService::heartbeatPresence()
+{
+    if (!_presence.heartbeat(_sessionManager.activeSessions()))
+        LOG_ERROR << "PRESENCE_HEARTBEAT failed node=" << _presence.nodeId();
+}
+
+void ChatService::logClusterMetrics() const
+{
+    const auto presence = _presence.metrics();
+    LOG_INFO << "CLUSTER_METRICS node=" << _presence.nodeId()
+             << " presence_bind=" << presence.bind
+             << " presence_unbind=" << presence.unbind
+             << " presence_lookup=" << presence.lookup
+             << " presence_hit=" << presence.hit
+             << " presence_miss=" << presence.miss
+             << " route_local=" << _routeLocal.load()
+             << " route_remote=" << _routeRemote.load()
+             << " route_received=" << _routeReceived.load()
+             << " route_stale=" << _routeStale.load()
+             << " route_failed=" << _routeFailed.load()
+             << " node_heartbeat=" << presence.nodeHeartbeat;
 }
 
 void ChatService::logDeliveryMetrics() const

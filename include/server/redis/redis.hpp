@@ -1,74 +1,60 @@
-#ifndef REDIS_H
-#define REDIS_H
+#ifndef CHAT_REDIS_HPP
+#define CHAT_REDIS_HPP
 
 #include <hiredis/hiredis.h>
-#include <thread>
+#include <condition_variable>
 #include <functional>
 #include <memory>
 #include <mutex>
-using namespace std;
+#include <string>
+#include <thread>
+#include <vector>
 
-// hiredis context 自动释放器
 struct RedisContextDeleter {
-    void operator()(redisContext* ctx) const {
-        if (ctx) redisFree(ctx);
-    }
+    void operator()(redisContext* context) const { if (context) redisFree(context); }
 };
-using RedisContextPtr = unique_ptr<redisContext, RedisContextDeleter>;
+struct RedisReplyDeleter {
+    void operator()(redisReply* reply) const { if (reply) freeReplyObject(reply); }
+};
+using RedisContextPtr = std::unique_ptr<redisContext, RedisContextDeleter>;
+using RedisReplyPtr = std::unique_ptr<redisReply, RedisReplyDeleter>;
 
-class Redis
+// 命令连接由 mutex 串行化；订阅连接只由观察线程使用。
+class Redis final
 {
 public:
-    Redis();
-    ~Redis() = default;  // unique_ptr 自动释放
+    Redis() = default;
+    ~Redis();
+    Redis(const Redis&) = delete;
+    Redis& operator=(const Redis&) = delete;
 
-    // 连接redis服务器
     bool connect();
-
-    // 检查连接状态
+    void stop();
     bool isConnected() const;
+    RedisReplyPtr command(const std::vector<std::string>& args);
+    std::vector<RedisReplyPtr> batch(const std::vector<std::vector<std::string>>& commands);
+    bool publish(const std::string& channel, const std::string& message);
+    bool subscribeNode(const std::string& channel,
+                       std::function<void(const std::string&)> handler);
 
-    // 向redis指定的通道channel发布消息
-    bool publish(int channel, string message);
-
-    // 向redis指定的通道subscribe订阅消息
-    bool subscribe(int channel);
-
-    // 向redis指定的通道unsubscribe取消订阅消息
-    bool unsubscribe(int channel);
-
-    // 在独立线程中接收订阅通道中的消息
-    void observer_channel_message();
-
-    // 初始化向业务层上报通道消息的回调对象
-    void init_notify_handler(function<void(int, string)> fn);
-
-    // 设置重连后回调（observer 重连成功后触发，用于批量恢复订阅）
-    void setReconnectHandler(function<void()> fn);
-
-    // 服务发现：注册 ChatServer 实例到 Redis
-    bool registerServer(const string& name, const string& host, int port);
-    // 更新当前连接数
-    bool updateConnections(const string& name, int count);
+    // 保留已有负载均衡 Hash；在线归属不依赖它。
+    bool registerServer(const std::string& name, const std::string& host, int port);
+    bool updateConnections(const std::string& name, int count);
 
 private:
-    // 重新连接两个上下文
-    bool reconnect();
+    bool connectCommandLocked();
+    void observe();
 
-    // hiredis同步上下文对象，负责publish消息（unique_ptr 自动释放）
-    RedisContextPtr _publish_context;
-
-    // hiredis同步上下文对象，负责subscribe消息（unique_ptr 自动释放）
-    RedisContextPtr _subcribe_context;
-
-    // 保护 _subcribe_context 的并发访问（observer 线程 + Muduo 线程）
-    mutex _subscribeMutex;
-
-    // 回调操作，收到订阅的消息，给service层上报
-    function<void(int, string)> _notify_message_handler;
-
-    // 重连后回调，用于批量恢复订阅
-    function<void()> _onReconnect;
+    mutable std::mutex _commandMutex;
+    RedisContextPtr _commandContext;
+    std::thread _observer;
+    std::mutex _observerMutex;
+    std::condition_variable _observerReady;
+    std::string _channel;
+    std::function<void(const std::string&)> _handler;
+    bool _subscribed = false;
+    bool _stopping = false;
+    int _subscriberFd = -1;
 };
 
 #endif

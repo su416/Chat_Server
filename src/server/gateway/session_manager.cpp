@@ -38,6 +38,14 @@ BindOutcome SessionManager::bind(
     }
 
     std::unique_lock<std::shared_mutex> lock(_mutex);
+    auto existingConnection = _byConnection.find(connection.get());
+    if (existingConnection != _byConnection.end())
+    {
+        auto previous = _sessions.find(existingConnection->second);
+        if (previous != _sessions.end() && previous->second->connection() == connection)
+            return {BindResult::ConnectionAlreadyBound, previous->second->id()};
+        _byConnection.erase(existingConnection);
+    }
     auto it = _sessions.find(userId);
     if (it != _sessions.end())
     {
@@ -46,6 +54,7 @@ BindOutcome SessionManager::bind(
             return {BindResult::DuplicateActiveSession, it->second->id()};
         }
 
+        _byConnection.erase(it->second->connectionKey());
         _sessions.erase(it);
     }
 
@@ -53,6 +62,7 @@ BindOutcome SessionManager::bind(
     _sessions.emplace(
         userId,
         std::make_shared<const Session>(sessionId, userId, connection));
+    _byConnection[connection.get()] = userId;
     return {BindResult::Bound, sessionId};
 }
 
@@ -78,6 +88,7 @@ bool SessionManager::unbindUser(
         return false;
     }
 
+    _byConnection.erase(expectedConnection.get());
     _sessions.erase(it);
     return true;
 }
@@ -91,18 +102,18 @@ std::optional<UserId> SessionManager::unbindConnection(
     }
 
     std::unique_lock<std::shared_mutex> lock(_mutex);
-    for (auto it = _sessions.begin(); it != _sessions.end(); ++it)
+    auto reverse = _byConnection.find(connection.get());
+    if (reverse == _byConnection.end()) return std::nullopt;
+    const UserId userId = reverse->second;
+    auto current = _sessions.find(userId);
+    if (current == _sessions.end() || current->second->connection() != connection)
     {
-        auto currentConnection = it->second->connection();
-        if (currentConnection && currentConnection == connection)
-        {
-            const UserId userId = it->first;
-            _sessions.erase(it);
-            return userId;
-        }
+        _byConnection.erase(reverse);
+        return std::nullopt;
     }
-
-    return std::nullopt;
+    _byConnection.erase(reverse);
+    _sessions.erase(current);
+    return userId;
 }
 
 std::shared_ptr<const Session> SessionManager::sessionForUser(UserId userId) const
@@ -163,6 +174,29 @@ std::vector<UserId> SessionManager::activeUserIds() const
         }
     }
     return userIds;
+}
+
+std::vector<std::pair<UserId, SessionId>> SessionManager::activeSessions() const
+{
+    std::vector<std::pair<UserId, SessionId>> result;
+    std::shared_lock<std::shared_mutex> lock(_mutex);
+    result.reserve(_sessions.size());
+    for (const auto& [userId, session] : _sessions)
+        if (!session->expired()) result.emplace_back(userId, session->id());
+    return result;
+}
+
+std::shared_ptr<const Session> SessionManager::sessionForConnection(
+    const muduo::net::TcpConnectionPtr& connection) const
+{
+    if (!connection) return nullptr;
+    std::shared_lock<std::shared_mutex> lock(_mutex);
+    auto reverse = _byConnection.find(connection.get());
+    if (reverse == _byConnection.end()) return nullptr;
+    auto current = _sessions.find(reverse->second);
+    if (current != _sessions.end() && current->second->connection() == connection)
+        return current->second;
+    return nullptr;
 }
 
 std::size_t SessionManager::activeCount() const

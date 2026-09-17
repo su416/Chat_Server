@@ -16,10 +16,7 @@ static EventLoop* g_loop = nullptr;
 // 处理服务器 ctrl+c —— 优雅关闭
 void resetHandler(int)
 {
-    // 1. 将所有在线用户标记为 offline
-    ChatService::instance()->reset();
-
-    // 2. 通知主循环退出（而非 exit(0) 硬杀进程）
+    // Signal handler 不执行 Redis/MySQL 操作。
     if (g_loop)
     {
         g_loop->quit();
@@ -29,7 +26,7 @@ void resetHandler(int)
 int main(int argc, char **argv)
 {
     // 加载配置文件
-    if (!Config::instance().load("conf/chatserver.json"))
+    if (!Config::instance().load(argc > 1 ? argv[1] : "conf/chatserver.json"))
     {
         cerr << "load config file failed!" << endl;
         return -1;
@@ -65,9 +62,11 @@ int main(int argc, char **argv)
     ChatService::instance();
 
     signal(SIGINT, resetHandler);
+    signal(SIGTERM, resetHandler);
 
     EventLoop loop;
     g_loop = &loop;
+    ChatService::instance()->setMainLoop(&loop);
 
     InetAddress addr(
         Config::instance().getServerIp(),
@@ -94,7 +93,9 @@ int main(int argc, char **argv)
     // 定期心跳：每 5 秒更新连接数到 Redis
     loop.runEvery(5.0, []() {
         ChatService::instance()->syncServerConnections();
+        ChatService::instance()->heartbeatPresence();
         ChatService::instance()->logDeliveryMetrics();
+        ChatService::instance()->logClusterMetrics();
     });
 
     // 一个周期 timer 扫描全部在线待确认项，不为每条消息创建线程。
@@ -103,6 +104,8 @@ int main(int argc, char **argv)
     });
 
     loop.loop();  // 阻塞直到 quit() 被调用
+
+    ChatService::instance()->reset();
 
     // 优雅关闭：释放所有资源
     DBThreadPool::instance()->shutdown();     // 等待 DB 线程结束
