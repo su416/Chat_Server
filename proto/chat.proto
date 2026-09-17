@@ -47,6 +47,11 @@ message OneChatRequest {
   string time = 5;
 }
 
+// 客户端对单次在线投递的确认；也支持 Envelope.payload 中的 JSON 形式。
+message MessageAck {
+  uint64 delivery_id = 1;
+}
+
 // 历史消息中的单条记录
 message ChatHistoryItem {
   int64 id = 1;

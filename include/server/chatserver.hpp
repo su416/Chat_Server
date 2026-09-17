@@ -23,6 +23,9 @@ public:
     static void sendResponse(const TcpConnectionPtr& conn,
                              const nlohmann::json& response,
                              bool forceJson = false);
+    static void sendResponse(const TcpConnectionPtr& conn,
+                             const gateway::MessageEnvelope& response,
+                             bool forceJson = false);
 
 private:
     void onConnection(const TcpConnectionPtr &);

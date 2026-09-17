@@ -25,25 +25,48 @@ void ChatServer::sendResponse(const TcpConnectionPtr& conn,
         {
             throw std::invalid_argument("outbound response must be JSON object");
         }
-        const int messageType = response.value("msgid", 0);
-        protocol::WireProtocol selected = protocol::WireProtocol::Json;
-        if (!forceJson)
-        {
-            const auto& context = conn->getContext();
-            if (const auto* state =
-                    boost::any_cast<protocol::ProtocolState>(&context))
-            {
-                selected = state->selected();
-            }
-        }
-        gateway::MessageEnvelope message(messageType, response, selected);
-        conn->send(protocol::MessageEncoder::encode(message, selected));
+        gateway::MessageEnvelope message(response.value("msgid", 0), response,
+                                         protocol::WireProtocol::Undetermined);
+        sendResponse(conn, message, forceJson);
     }
     catch (const std::exception& error)
     {
         LOG_WARN << "unable to encode client response: " << error.what();
         conn->shutdown();
     }
+}
+
+void ChatServer::sendResponse(const TcpConnectionPtr& conn,
+                              const gateway::MessageEnvelope& response,
+                              bool forceJson)
+{
+    if (!conn) return;
+    // Redis callback、别的连接的 I/O loop、主 loop 定时器都可能调用本入口。
+    // 只在目标连接的 EventLoop 读取 ProtocolState，并且不延长断线连接寿命。
+    std::weak_ptr<TcpConnection> weakConnection = conn;
+    conn->getLoop()->runInLoop([weakConnection, response, forceJson]() {
+        auto target = weakConnection.lock();
+        if (!target || !target->connected()) return;
+        try
+        {
+            protocol::WireProtocol selected = protocol::WireProtocol::Json;
+            if (!forceJson)
+            {
+                const auto& context = target->getContext();
+                if (const auto* state =
+                        boost::any_cast<protocol::ProtocolState>(&context))
+                {
+                    selected = state->selected();
+                }
+            }
+            target->send(protocol::MessageEncoder::encode(response, selected));
+        }
+        catch (const std::exception& error)
+        {
+            LOG_WARN << "unable to encode client response: " << error.what();
+            target->shutdown();
+        }
+    });
 }
 
 // 初始化聊天服务器对象

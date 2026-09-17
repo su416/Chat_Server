@@ -2,6 +2,7 @@
 
 #include "binary_codec.hpp"
 #include "chat.pb.h"
+#include "gateway/delivery_id.hpp"
 #include "jsoncodec.hpp"
 #include "protocodec.hpp"
 #include "public.hpp"
@@ -56,8 +57,18 @@ DecodeResult normalizedJson(std::string frame,
             }
             messageType = payload["msgid"].get<int>();
         }
+        std::optional<std::uint64_t> deliveryId;
+        if (messageType == MESSAGE_ACK)
+        {
+            deliveryId = gateway::parseDeliveryId(payload);
+            if (!deliveryId)
+            {
+                return DecodeResult::failure(DecodeError::MalformedFrame,
+                                             "invalid ACK delivery_id");
+            }
+        }
         return DecodeResult::complete(gateway::MessageEnvelope(
-            messageType, std::move(payload), sourceProtocol));
+            messageType, std::move(payload), sourceProtocol, deliveryId));
     }
     catch (const std::exception& error)
     {
@@ -129,6 +140,14 @@ bool normalizeTypedProtobuf(int messageType,
         normalized["limit"] = request.limit();
         return true;
     }
+    case MESSAGE_ACK:
+    {
+        chat::MessageAck request;
+        if (!request.ParseFromString(payload) || request.delivery_id() == 0)
+            return false;
+        normalized["delivery_id"] = std::to_string(request.delivery_id());
+        return true;
+    }
     default:
         return false;
     }
@@ -160,8 +179,18 @@ DecodeResult normalizedProtobuf(std::string frame)
     }
 
     payload["msgid"] = messageType;
+    std::optional<std::uint64_t> deliveryId;
+    if (messageType == MESSAGE_ACK)
+    {
+        deliveryId = gateway::parseDeliveryId(payload);
+        if (!deliveryId)
+        {
+            return DecodeResult::failure(DecodeError::MalformedFrame,
+                                         "invalid ACK delivery_id");
+        }
+    }
     return DecodeResult::complete(gateway::MessageEnvelope(
-        messageType, std::move(payload), WireProtocol::Protobuf));
+        messageType, std::move(payload), WireProtocol::Protobuf, deliveryId));
 }
 
 WireProtocol detectProtocol(const muduo::net::Buffer& buffer)

@@ -4,6 +4,9 @@
 #include "json.hpp"
 #include "protocol/protocol_state.hpp"
 
+#include <cstdint>
+#include <optional>
+#include <string>
 #include <utility>
 
 namespace gateway
@@ -16,11 +19,17 @@ class MessageEnvelope final
 public:
     MessageEnvelope(int messageType,
                     nlohmann::json payload,
-                    protocol::WireProtocol sourceProtocol)
+                    protocol::WireProtocol sourceProtocol,
+                    std::optional<std::uint64_t> deliveryId = std::nullopt)
         : _messageType(messageType),
           _payload(std::move(payload)),
-          _sourceProtocol(sourceProtocol)
+          _sourceProtocol(sourceProtocol),
+          _deliveryId(deliveryId)
     {
+        if (_deliveryId)
+        {
+            _payload["delivery_id"] = std::to_string(*_deliveryId);
+        }
     }
 
     int messageType() const noexcept { return _messageType; }
@@ -29,11 +38,16 @@ public:
     {
         return _sourceProtocol;
     }
+    std::optional<std::uint64_t> deliveryId() const noexcept
+    {
+        return _deliveryId;
+    }
 
 private:
     int _messageType;
     nlohmann::json _payload;
     protocol::WireProtocol _sourceProtocol;
+    std::optional<std::uint64_t> _deliveryId;
 };
 
 } // namespace gateway

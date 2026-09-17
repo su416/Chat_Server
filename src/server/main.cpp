@@ -94,6 +94,12 @@ int main(int argc, char **argv)
     // 定期心跳：每 5 秒更新连接数到 Redis
     loop.runEvery(5.0, []() {
         ChatService::instance()->syncServerConnections();
+        ChatService::instance()->logDeliveryMetrics();
+    });
+
+    // 一个周期 timer 扫描全部在线待确认项，不为每条消息创建线程。
+    loop.runEvery(0.5, []() {
+        ChatService::instance()->scanReliableDeliveries();
     });
 
     loop.loop();  // 阻塞直到 quit() 被调用

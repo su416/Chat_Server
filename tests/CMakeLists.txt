@@ -52,6 +52,7 @@ target_link_libraries(test_session_manager ${COMMON_LIBS} pthread)
 add_executable(test_message_decoder
     test_message_decoder.cpp
     ${PROJECT_SOURCE_DIR}/src/server/protocol/message_decoder.cpp
+    ${PROJECT_SOURCE_DIR}/src/server/protocol/message_encoder.cpp
     ${PROJECT_SOURCE_DIR}/src/server/jsoncodec.cpp
     ${PROJECT_SOURCE_DIR}/src/server/protocodec.cpp
     ${PROJECT_SOURCE_DIR}/src/server/binary_codec.cpp
@@ -73,6 +74,13 @@ add_executable(test_message_router
     ${PROJECT_SOURCE_DIR}/src/server/protocodec.cpp
     ${PROJECT_SOURCE_DIR}/build/generated/proto/chat.pb.cc
 )
+
+add_executable(test_pending_delivery_manager
+    test_pending_delivery_manager.cpp
+    ${PROJECT_SOURCE_DIR}/src/server/gateway/pending_delivery_manager.cpp
+)
+target_link_libraries(test_pending_delivery_manager
+    ${COMMON_LIBS} muduo_net muduo_base pthread)
 target_link_libraries(test_message_router
     ${COMMON_LIBS}
     muduo_net
@@ -100,8 +108,16 @@ endif()
 
 # --- 注册到 CTest ---
 enable_testing()
-foreach(test_name test_rate_limiter test_jsoncodec test_protocodec test_password_utils test_session_manager test_message_decoder test_message_router test_friendlistmodel)
+foreach(test_name test_rate_limiter test_jsoncodec test_protocodec test_password_utils test_session_manager test_message_decoder test_message_router test_pending_delivery_manager test_friendlistmodel)
     if(TARGET ${test_name})
         add_test(NAME ${test_name} COMMAND $<TARGET_FILE:${test_name}>)
     endif()
 endforeach()
+
+find_package(Python3 QUIET COMPONENTS Interpreter)
+if(Python3_Interpreter_FOUND)
+    add_test(NAME test_reliable_client
+        COMMAND ${Python3_EXECUTABLE} -m unittest discover -s tests -p test_reliable_client.py)
+    set_tests_properties(test_reliable_client PROPERTIES
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+endif()

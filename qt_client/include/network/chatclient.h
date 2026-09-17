@@ -6,6 +6,8 @@
 #include <QJsonObject>
 #include <QJsonArray>
 #include <QTimer>
+#include <QQueue>
+#include <QSet>
 
 class ChatClient : public QObject
 {
@@ -90,6 +92,10 @@ private:
     quint16 m_port = 0;
     bool m_autoReconnect = true;
     bool m_useProtobuf = false;
+    // 当前客户端进程内最近处理过的投递；有界，旧版无 delivery_id 的消息不受影响。
+    QSet<quint64> m_seenDeliveries;
+    QQueue<quint64> m_recentDeliveries;
+    static constexpr int kRecentDeliveryLimit = 4096;
 };
 
 #endif

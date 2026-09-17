@@ -274,12 +274,38 @@ void ChatClient::dispatchMessage(const QJsonObject &obj)
     // ONE_CHAT_MSG = 6
     if (msgid == 6)
     {
+        const QString idText = obj.value("delivery_id").toString();
+        bool validId = false;
+        const quint64 deliveryId = idText.toULongLong(&validId);
+        if (!idText.isEmpty() && (!validId || deliveryId == 0))
+        {
+            qWarning() << "invalid delivery_id in one-chat message";
+            return;
+        }
+        if (validId && m_seenDeliveries.contains(deliveryId))
+        {
+            qDebug() << "DELIVERY_DUPLICATE id=" << idText;
+            QJsonObject ack{{"msgid", 20}, {"delivery_id", idText}};
+            sendJson(ack); // 重复投递仍需 ACK，避免 ACK 丢失后的永久重试。
+            return;
+        }
         int fromId = obj.value("id").toInt();
         QString name = obj.value("name").toString();
         QString msg = obj.value("msg").toString();
         QString time = obj.value("time").toString();
 
         emit oneChatMessageReceived(fromId, name, msg, time);
+        if (validId)
+        {
+            m_seenDeliveries.insert(deliveryId);
+            m_recentDeliveries.enqueue(deliveryId);
+            while (m_recentDeliveries.size() > kRecentDeliveryLimit)
+            {
+                m_seenDeliveries.remove(m_recentDeliveries.dequeue());
+            }
+            QJsonObject ack{{"msgid", 20}, {"delivery_id", idText}};
+            sendJson(ack);
+        }
         return;
     }
 

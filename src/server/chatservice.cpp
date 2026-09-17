@@ -8,6 +8,7 @@
 #include <vector>
 #include "proto_utils.hpp"
 #include "config.hpp"
+#include "gateway/delivery_id.hpp"
 #include <boost/any.hpp>
 
 using namespace std;
@@ -52,6 +53,7 @@ ChatService::ChatService()
     _msgHandlerMap.insert({LOGINOUT_MSG, std::bind(&ChatService::loginout, this, _1, _2, _3)});
     _msgHandlerMap.insert({REG_MSG, std::bind(&ChatService::reg, this, _1, _2, _3)});
     _msgHandlerMap.insert({ONE_CHAT_MSG, std::bind(&ChatService::oneChat, this, _1, _2, _3)});
+    _msgHandlerMap.insert({MESSAGE_ACK, std::bind(&ChatService::messageAck, this, _1, _2, _3)});
     _msgHandlerMap.insert({ADD_FRIEND_MSG, std::bind(&ChatService::addFriend, this, _1, _2, _3)});
 
     // 群组业务管理相关事件处理回调注册
@@ -301,6 +303,10 @@ void ChatService::loginout(const TcpConnectionPtr &conn, json &js, Timestamp tim
         return;
     }
 
+    const auto cancelled = _pendingDeliveries.cancelConnection(conn);
+    if (cancelled)
+        LOG_WARN << "DELIVERY_FAILED disconnected session count=" << cancelled;
+
     syncServerConnections();
 
     // 用户注销，相当于就是下线，在redis中取消订阅通道
@@ -314,6 +320,9 @@ void ChatService::loginout(const TcpConnectionPtr &conn, json &js, Timestamp tim
 // 处理客户端异常退出
 void ChatService::clientCloseException(const TcpConnectionPtr &conn)
 {
+    const auto cancelled = _pendingDeliveries.cancelConnection(conn);
+    if (cancelled)
+        LOG_WARN << "DELIVERY_FAILED disconnected session count=" << cancelled;
     auto userId = _sessionManager.unbindConnection(conn);
     if (!userId)
     {
@@ -333,7 +342,9 @@ void ChatService::clientCloseException(const TcpConnectionPtr &conn)
 
 // 一对一聊天业务
 void ChatService::oneChat(const TcpConnectionPtr &conn, json &js, Timestamp time)
-{           
+{
+    // delivery_id 只能由服务端为本地在线投递生成，不能接受发送者自报身份。
+    js.erase("delivery_id");
     int fromid = js["id"].get<int>();
     int toid = js["toid"].get<int>();
     string msg = js["msg"];
@@ -352,16 +363,72 @@ void ChatService::oneChat(const TcpConnectionPtr &conn, json &js, Timestamp time
     // 异步落库单聊历史消息（快照发送者昵称到 extra 列，避免历史查询 JOIN）
     string name = js.value("name", "");
     string extra = name.empty() ? "" : json{{"name", name}}.dump();
-    DBThreadPool::instance()->submitVoid([this, fromid, toid, msg, extra]() {
-        _chatHistoryModel.insertOneChat(fromid, toid, msg, 0, extra);
-    });
+    auto recordHistory = [this, fromid, toid, msg, extra]() {
+        DBThreadPool::instance()->submitVoid([this, fromid, toid, msg, extra]() {
+            _chatHistoryModel.insertOneChat(fromid, toid, msg, 0, extra);
+        });
+    };
 
-    if (auto targetConnection = _sessionManager.connectionForUser(toid))
+    if (auto session = _sessionManager.sessionForUser(toid))
     {
-        // toid 在本节点在线，转发消息。
-        sendTcpJson(targetConnection, js);
-        return;
+        if (auto targetConnection = session->connection())
+        {
+            // 在目标连接的 I/O loop 读取 ProtocolState，避免跨线程访问 context。
+            // 旧 Binary 接收端没有 ACK 能力，保留 Phase 2 原投递行为。
+            std::weak_ptr<const gateway::Session> weakSession = session;
+            std::weak_ptr<TcpConnection> weakTarget = targetConnection;
+            std::weak_ptr<TcpConnection> weakSender = conn;
+            const json request = js;
+            targetConnection->getLoop()->runInLoop(
+                [this, weakSession, weakTarget, weakSender, request,
+                 toid, recordHistory]() {
+                    auto currentSession = weakSession.lock();
+                    auto target = weakTarget.lock();
+                    if (!currentSession || !target || !target->connected() ||
+                        _sessionManager.sessionForUser(toid) != currentSession)
+                    {
+                        if (auto sender = weakSender.lock())
+                        {
+                            sendTcpJson(sender, json{{"msgid", ONE_CHAT_MSG_ACK},
+                                                     {"errno", 5},
+                                                     {"errmsg", "receiver session changed"}});
+                        }
+                        return;
+                    }
+
+                    const auto& context = target->getContext();
+                    const auto* state = boost::any_cast<protocol::ProtocolState>(&context);
+                    if (state && state->selected() == protocol::WireProtocol::Binary)
+                    {
+                        recordHistory();
+                        sendTcpJson(target, request);
+                        return;
+                    }
+
+                    const auto deliveryId = _pendingDeliveries.nextDeliveryId();
+                    gateway::MessageEnvelope delivery(
+                        ONE_CHAT_MSG, request,
+                        protocol::WireProtocol::Undetermined, deliveryId);
+                    if (!_pendingDeliveries.track(currentSession, delivery))
+                    {
+                        if (auto sender = weakSender.lock())
+                        {
+                            sendTcpJson(sender, json{{"msgid", ONE_CHAT_MSG_ACK},
+                                                     {"errno", 4},
+                                                     {"errmsg", "reliable delivery capacity exhausted"}});
+                        }
+                        return;
+                    }
+                    recordHistory();
+                    LOG_DEBUG << "DELIVERY_SEND id=" << deliveryId
+                              << " receiver=" << toid;
+                    ChatServer::sendResponse(target, delivery);
+                });
+            return;
+        }
     }
+
+    recordHistory();
 
     // 查询 toid 是否在线
     User user = _userModel.query(toid);
@@ -690,4 +757,54 @@ void ChatService::queryGroupChatHistory(const TcpConnectionPtr &conn, json &js, 
     response["history"] = vec;
 
     sendTcpJson(conn, response);
+}
+
+void ChatService::messageAck(const TcpConnectionPtr &conn, json &js, Timestamp)
+{
+    const auto deliveryId = gateway::parseDeliveryId(js);
+    if (!deliveryId) return; // Decoder 已拒绝非法 wire；此处作防御性检查。
+    const auto result = _pendingDeliveries.ack(*deliveryId, conn);
+    if (result == gateway::AckResult::Acked)
+    {
+        LOG_DEBUG << "DELIVERY_ACK id=" << *deliveryId;
+    }
+    else if (result == gateway::AckResult::Unknown)
+    {
+        LOG_DEBUG << "DELIVERY_DUPLICATE or unknown ACK id=" << *deliveryId;
+    }
+    else
+    {
+        LOG_WARN << "DELIVERY_ACK wrong session id=" << *deliveryId;
+    }
+}
+
+void ChatService::scanReliableDeliveries()
+{
+    for (const auto& retry : _pendingDeliveries.scanExpired())
+    {
+        auto session = retry.session.lock();
+        if (!session || _sessionManager.sessionForUser(retry.receiverId) != session)
+            continue;
+        auto connection = session->connection();
+        if (!connection || !connection->connected())
+            continue;
+        LOG_DEBUG << "DELIVERY_TIMEOUT id=" << *retry.envelope.deliveryId();
+        LOG_DEBUG << "DELIVERY_RETRY id=" << *retry.envelope.deliveryId()
+                  << " count=" << retry.retryCount;
+        ChatServer::sendResponse(connection, retry.envelope);
+    }
+}
+
+void ChatService::logDeliveryMetrics() const
+{
+    const auto metrics = _pendingDeliveries.metrics();
+    LOG_INFO << "DELIVERY_METRICS sent=" << metrics.sent
+             << " acked=" << metrics.acked
+             << " retried=" << metrics.retried
+             << " timeout=" << metrics.timedOut
+             << " failed=" << metrics.failed
+             << " pending=" << metrics.pending
+             << " peak=" << metrics.pendingPeak
+             << " pending_bytes=" << metrics.pendingBytes
+             << " peak_bytes=" << metrics.pendingPeakBytes;
 }

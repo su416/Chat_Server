@@ -16,6 +16,7 @@ using namespace muduo::net;
 #include "usermodel.hpp"
 #include "chathistorymodel.hpp"
 #include "gateway/session_manager.hpp"
+#include "gateway/pending_delivery_manager.hpp"
 #include "json.hpp"
 using json = nlohmann::json;
 
@@ -38,6 +39,9 @@ public:
     void reg(const TcpConnectionPtr &conn, json &js, Timestamp time);
     // 一对一聊天业务
     void oneChat(const TcpConnectionPtr &conn, json &js, Timestamp time);
+    void messageAck(const TcpConnectionPtr &conn, json &js, Timestamp time);
+    void scanReliableDeliveries();
+    void logDeliveryMetrics() const;
     // 添加好友业务
     void addFriend(const TcpConnectionPtr &conn, json &js, Timestamp time);
     // 创建群组业务
@@ -73,6 +77,7 @@ private:
     unordered_map<int, MsgHandler> _msgHandlerMap;
     // 逻辑会话与 TCP 连接生命周期分离；业务层不再直接维护连接映射。
     gateway::SessionManager _sessionManager;
+    gateway::PendingDeliveryManager _pendingDeliveries;
 
     // 数据操作类对象
     UserModel _userModel;

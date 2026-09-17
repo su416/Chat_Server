@@ -4,6 +4,7 @@
 #include "chat.pb.h"
 #include "jsoncodec.hpp"
 #include "protocol/message_decoder.hpp"
+#include "protocol/message_encoder.hpp"
 #include "protocodec.hpp"
 #include "public.hpp"
 
@@ -301,4 +302,96 @@ TEST(MessageDecoderTest, ProtobufSplitAndCoalescedFramesPreserveOrder)
     EXPECT_EQ(result2.message->payload()["id"], 2);
     EXPECT_EQ(result3.message->payload()["id"], 3);
     EXPECT_EQ(buffer.readableBytes(), 0u);
+}
+
+TEST(MessageDecoderTest, JsonAndProtobufAckCarrySameDeliveryId)
+{
+    const std::uint64_t id = 18446744073709551614ull;
+    Buffer jsonBuffer;
+    jsonBuffer.append(JsonCodec::encode(
+        R"({"msgid":20,"delivery_id":"18446744073709551614"})"));
+    protocol::ProtocolState jsonState;
+    auto jsonAck = protocol::MessageDecoder::decode(&jsonBuffer, jsonState);
+
+    chat::MessageAck request;
+    request.set_delivery_id(id);
+    Buffer protoBuffer;
+    protoBuffer.append(typedProtoFrame(MESSAGE_ACK, request));
+    protocol::ProtocolState protoState;
+    auto protoAck = protocol::MessageDecoder::decode(&protoBuffer, protoState);
+
+    ASSERT_EQ(jsonAck.status, protocol::DecodeStatus::Complete);
+    ASSERT_EQ(protoAck.status, protocol::DecodeStatus::Complete);
+    EXPECT_EQ(jsonAck.message->messageType(), MESSAGE_ACK);
+    EXPECT_EQ(protoAck.message->messageType(), MESSAGE_ACK);
+    EXPECT_EQ(jsonAck.message->deliveryId(), id);
+    EXPECT_EQ(protoAck.message->deliveryId(), id);
+    EXPECT_EQ(jsonAck.message->payload(), protoAck.message->payload());
+}
+
+TEST(MessageDecoderTest, RejectsInvalidAckIdWithoutThrowing)
+{
+    for (const std::string body : {
+             R"({"msgid":20,"delivery_id":"0"})",
+             R"({"msgid":20,"delivery_id":42})",
+             R"({"msgid":20,"delivery_id":"18446744073709551616"})",
+             R"({"msgid":20,"delivery_id":"-1"})"})
+    {
+        Buffer buffer;
+        buffer.append(JsonCodec::encode(body));
+        protocol::ProtocolState state;
+        EXPECT_EQ(protocol::MessageDecoder::decode(&buffer, state).status,
+                  protocol::DecodeStatus::Error);
+    }
+    chat::MessageAck invalid;
+    invalid.set_delivery_id(0);
+    Buffer buffer;
+    buffer.append(typedProtoFrame(MESSAGE_ACK, invalid));
+    protocol::ProtocolState state;
+    EXPECT_EQ(protocol::MessageDecoder::decode(&buffer, state).status,
+              protocol::DecodeStatus::Error);
+}
+
+TEST(MessageDecoderTest, ReliableDeliveryEncodesForJsonAndProtobuf)
+{
+    gateway::MessageEnvelope delivery(
+        ONE_CHAT_MSG, {{"msgid", ONE_CHAT_MSG}, {"msg", "hello"}},
+        protocol::WireProtocol::Undetermined, 123456789ull);
+
+    Buffer jsonBuffer;
+    jsonBuffer.append(protocol::MessageEncoder::encode(
+        delivery, protocol::WireProtocol::Json));
+    protocol::ProtocolState jsonState;
+    auto jsonResult = protocol::MessageDecoder::decode(&jsonBuffer, jsonState);
+    ASSERT_EQ(jsonResult.status, protocol::DecodeStatus::Complete);
+    EXPECT_EQ(jsonResult.message->payload()["delivery_id"], "123456789");
+
+    Buffer protoBuffer;
+    protoBuffer.append(protocol::MessageEncoder::encode(
+        delivery, protocol::WireProtocol::Protobuf));
+    std::string wire;
+    ASSERT_TRUE(ProtoCodec::tryExtractFrame(&protoBuffer, wire));
+    chat::Envelope envelope;
+    ASSERT_TRUE(envelope.ParseFromString(wire));
+    EXPECT_EQ(envelope.msgid(), ONE_CHAT_MSG);
+    auto payload = nlohmann::json::parse(envelope.payload());
+    EXPECT_EQ(payload["delivery_id"], "123456789");
+}
+
+TEST(MessageDecoderTest, AckEnvelopeEncodesThroughBothWireCodecs)
+{
+    gateway::MessageEnvelope ack(
+        MESSAGE_ACK, {{"msgid", MESSAGE_ACK}},
+        protocol::WireProtocol::Undetermined, 987654321ull);
+    for (auto wireProtocol : {protocol::WireProtocol::Json,
+                              protocol::WireProtocol::Protobuf})
+    {
+        Buffer buffer;
+        buffer.append(protocol::MessageEncoder::encode(ack, wireProtocol));
+        protocol::ProtocolState state;
+        auto result = protocol::MessageDecoder::decode(&buffer, state);
+        ASSERT_EQ(result.status, protocol::DecodeStatus::Complete);
+        EXPECT_EQ(result.message->messageType(), MESSAGE_ACK);
+        EXPECT_EQ(result.message->deliveryId(), 987654321ull);
+    }
 }

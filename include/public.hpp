@@ -27,7 +27,8 @@ enum EnMsgType
 CREATE_GROUP_MSG_ACK,  //创建群成功
 ADD_GROUP_MSG_ACK,      //加群成功
 ONE_CHAT_MSG_ACK,       // 单聊限流/错误响应
-GROUP_CHAT_MSG_ACK      // 群聊限流/错误响应
+GROUP_CHAT_MSG_ACK,     // 群聊限流/错误响应
+MESSAGE_ACK             // 接收端对 delivery_id 的业务层确认
 };
 
 #endif
