@@ -26,7 +26,9 @@ struct RoutedMessage {
     static std::optional<RoutedMessage> decode(const std::string& encoded);
 };
 
-enum class RouteOutcome { Accepted, Retry, Terminal };
+// Infrastructure failures remain in the PEL; business-level retries still
+// obey the Phase 5 dead-letter bound.
+enum class RouteOutcome { Accepted, Retry, RetryInfrastructure, Terminal };
 struct RouteMetrics {
     std::uint64_t produced = 0, consumed = 0, acked = 0;
     std::uint64_t retried = 0, claimed = 0, duplicate = 0, failed = 0;

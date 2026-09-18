@@ -19,6 +19,7 @@ using namespace muduo::net;
 #include "chathistorymodel.hpp"
 #include "gateway/session_manager.hpp"
 #include "gateway/pending_delivery_manager.hpp"
+#include "model/durablependingmodel.hpp"
 #include "cluster/presence_manager.hpp"
 #include "cluster/route_transport.hpp"
 #include "json.hpp"
@@ -82,10 +83,19 @@ private:
     enum class RouteStatus { Sent, Offline, Error };
     RouteStatus routeToUser(int receiverId, int senderId, int messageType,
                             const json& payload);
-    cluster::RouteOutcome deliverRoutedOneChat(
+    void processRoutedMessage(
+        cluster::RoutedMessage message,
+        std::function<void(cluster::RouteOutcome)> complete);
+    void persistAndDeliver(
         const std::shared_ptr<const gateway::Session>& session,
-        const cluster::RoutedMessage& message);
-    cluster::RouteOutcome processRoutedMessage(cluster::RoutedMessage message);
+        const json& payload, const std::string& routeId,
+        std::function<void(bool)> complete);
+    bool activateDurable(
+        const std::shared_ptr<const gateway::Session>& session,
+        const gateway::DurablePendingRecord& record);
+    void recoverForSession(const std::shared_ptr<const gateway::Session>& session);
+    void recoverAtStartup();
+    void handleDueDurableRecord(gateway::DurablePendingRecord record);
     void storeOffline(int senderId, int receiverId, const json& payload);
 
     // 存储消息 id 和其对应的业务处理方法
@@ -93,6 +103,7 @@ private:
     // 逻辑会话与 TCP 连接生命周期分离；业务层不再直接维护连接映射。
     gateway::SessionManager _sessionManager;
     gateway::PendingDeliveryManager _pendingDeliveries;
+    gateway::DurablePendingModel _durablePendingModel;
 
     // 数据操作类对象
     UserModel _userModel;
@@ -107,6 +118,9 @@ private:
     std::atomic<std::uint64_t> _routeLocal{0}, _routeRemote{0},
         _routeReceived{0}, _routeStale{0}, _routeFailed{0};
     std::atomic<muduo::net::EventLoop*> _mainLoop{nullptr};
+    std::atomic<bool> _durableScanInFlight{false};
+    std::atomic<std::uint64_t> _durablePersisted{0}, _durableRecovered{0},
+        _durableAcked{0}, _durableDbFailed{0};
 };
 
 #endif

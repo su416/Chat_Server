@@ -101,6 +101,96 @@ AckResult PendingDeliveryManager::ack(
     return AckResult::Acked;
 }
 
+AckResult PendingDeliveryManager::validateAck(
+    std::uint64_t deliveryId,
+    const muduo::net::TcpConnectionPtr& connection) const
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    auto it = _pending.find(deliveryId);
+    if (it == _pending.end()) return AckResult::Unknown;
+    auto session = it->second.session.lock();
+    return connection && session && session->connection() == connection
+        ? AckResult::Acked : AckResult::WrongSession;
+}
+
+bool PendingDeliveryManager::completeDurableAck(std::uint64_t deliveryId)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    auto it = _pending.find(deliveryId);
+    if (it == _pending.end()) return false;
+    _pendingBytes -= it->second.payloadBytes;
+    _pending.erase(it);
+    ++_metrics.acked;
+    return true;
+}
+
+RestoreResult PendingDeliveryManager::restore(
+    const std::shared_ptr<const Session>& session,
+    const MessageEnvelope& envelope, std::uint32_t retryCount,
+    Clock::time_point now)
+{
+    if (!session || !session->connection() || !envelope.deliveryId() ||
+        *envelope.deliveryId() == 0) return RestoreResult::CapacityExceeded;
+    const auto bytes = envelope.payload().dump().size();
+    std::lock_guard<std::mutex> lock(_mutex);
+    if (_pending.count(*envelope.deliveryId())) return RestoreResult::AlreadyTracked;
+    if (_pending.size() >= _policy.maxPending ||
+        bytes > _policy.maxPendingBytes - _pendingBytes)
+        return RestoreResult::CapacityExceeded;
+    _pending.emplace(*envelope.deliveryId(),
+        PendingMessage{session->userId(), envelope, session, now, retryCount, bytes});
+    ++_metrics.sent;
+    _pendingBytes += bytes;
+    _metrics.pendingPeak = std::max(_metrics.pendingPeak, _pending.size());
+    _metrics.pendingPeakBytes = std::max(_metrics.pendingPeakBytes, _pendingBytes);
+    return RestoreResult::Inserted;
+}
+
+bool PendingDeliveryManager::markDurableRetry(
+    std::uint64_t deliveryId, std::uint32_t retryCount, Clock::time_point now)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    auto it = _pending.find(deliveryId);
+    if (it == _pending.end()) return false;
+    it->second.retryCount = retryCount;
+    it->second.lastSend = now;
+    ++_metrics.retried;
+    return true;
+}
+
+bool PendingDeliveryManager::suspend(std::uint64_t deliveryId)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    auto it = _pending.find(deliveryId);
+    if (it == _pending.end()) return false;
+    _pendingBytes -= it->second.payloadBytes;
+    _pending.erase(it);
+    return true;
+}
+
+std::vector<std::uint64_t> PendingDeliveryManager::suspendConnection(
+    const muduo::net::TcpConnectionPtr& connection)
+{
+    std::vector<std::uint64_t> ids;
+    if (!connection) return ids;
+    std::lock_guard<std::mutex> lock(_mutex);
+    for (auto it = _pending.begin(); it != _pending.end();) {
+        auto session = it->second.session.lock();
+        if (session && session->connection() == connection) {
+            ids.push_back(it->first);
+            _pendingBytes -= it->second.payloadBytes;
+            it = _pending.erase(it);
+        } else ++it;
+    }
+    return ids;
+}
+
+bool PendingDeliveryManager::contains(std::uint64_t deliveryId) const
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    return _pending.count(deliveryId) != 0;
+}
+
 bool PendingDeliveryManager::cancel(std::uint64_t deliveryId)
 {
     std::lock_guard<std::mutex> lock(_mutex);

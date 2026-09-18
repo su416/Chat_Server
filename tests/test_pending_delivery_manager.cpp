@@ -176,3 +176,34 @@ TEST(PendingDeliveryTest, IdGenerationIsConcurrentAndUnique)
     EXPECT_EQ(std::unique(all.begin(), all.end()), all.end());
     EXPECT_EQ(all.size(), 8000u);
 }
+
+TEST(PendingDeliveryTest, DurableAckOnlyClearsAfterCommit)
+{
+    PendingDeliveryManager manager(fastPolicy());
+    auto connection = fakeConnection(1);
+    auto session = makeSession(1, 1001, connection);
+    const std::uint64_t durableId = 501;
+    ASSERT_EQ(manager.restore(session, message(durableId), 1),
+              gateway::RestoreResult::Inserted);
+    EXPECT_EQ(manager.validateAck(durableId, connection), gateway::AckResult::Acked);
+    EXPECT_TRUE(manager.contains(durableId)); // DB commit has not completed.
+    EXPECT_TRUE(manager.completeDurableAck(durableId));
+    EXPECT_FALSE(manager.completeDurableAck(durableId));
+    EXPECT_EQ(manager.validateAck(durableId, connection), gateway::AckResult::Unknown);
+}
+
+TEST(PendingDeliveryTest, DurableRestorePreservesIdAndRetryCount)
+{
+    PendingDeliveryManager manager(fastPolicy());
+    auto connection = fakeConnection(1);
+    auto session = makeSession(1, 1001, connection);
+    const std::uint64_t id = 502;
+    EXPECT_EQ(manager.restore(session, message(id), 1), gateway::RestoreResult::Inserted);
+    EXPECT_EQ(manager.restore(session, message(id), 1), gateway::RestoreResult::AlreadyTracked);
+    EXPECT_TRUE(manager.markDurableRetry(id, 2));
+    EXPECT_EQ(manager.metrics().pending, 1u);
+    EXPECT_EQ(manager.metrics().retried, 1u);
+    EXPECT_TRUE(manager.suspend(id));
+    EXPECT_EQ(manager.restore(session, message(id), 2), gateway::RestoreResult::Inserted);
+    EXPECT_EQ(manager.metrics().pending, 1u);
+}

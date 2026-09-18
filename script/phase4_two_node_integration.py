@@ -20,7 +20,7 @@ ROOT = Path(__file__).resolve().parent.parent
 RUN_ID = f"phase4_{int(time.time())}_{os.getpid()}"
 
 
-def start_server(folder, node, port, redis_port=6379):
+def start_server(folder, node, port, redis_port=6379, extra_env=None):
     config = json.loads((ROOT / "conf/chatserver.json").read_text())
     config["server"].update({"node_id": node, "name": f"ChatServer-{node}", "port": port})
     config["redis"]["port"] = redis_port
@@ -29,7 +29,8 @@ def start_server(folder, node, port, redis_port=6379):
     log = (folder / f"{node}.log").open("w+")
     process = subprocess.Popen(["stdbuf", "-oL", "-eL",
                                 str(ROOT / "bin/ChatServer"), str(path)],
-                               cwd=ROOT, stdout=log, stderr=subprocess.STDOUT)
+                               cwd=ROOT, stdout=log, stderr=subprocess.STDOUT,
+                               env={**os.environ, **(extra_env or {})})
     deadline = time.monotonic() + 12
     while time.monotonic() < deadline:
         if process.poll() is not None:
@@ -148,7 +149,9 @@ def test_reconnect_and_stale_route():
                  "hops": 0,
                  "payload": {"msgid": 6, "id": sender[0], "toid": receiver[0],
                              "msg": f"{RUN_ID}-stale", "name": sender[1]}}
-        assert int(redis("PUBLISH", "chat:route:node:B", json.dumps(stale))) > 0
+        # Phase 5 replaced the former Pub/Sub channel with a per-node Stream.
+        assert redis("XADD", "chat:route:stream:B", "*", "body",
+                     json.dumps(stale))
         ack(new_wire, receive_one(new_wire, stale["payload"]["msg"]))
         assert old_wire.recv(0.5) is None, "stale route delivered to old Session"
         print("PASS stale route: at most one reroute; no stale client delivery", flush=True)
@@ -209,10 +212,17 @@ def test_dead_node(process_b):
         process_b.kill()  # Intentional kill -9, no graceful cleanup.
         process_b.wait(timeout=5)
         time.sleep(0.4)
-        send_one(sender_wire, sender, receiver, f"{RUN_ID}-route-fail")
-        failed = sender_wire.recv(5)
-        assert failed and failed.get("errno") == 6, failed
-        print("PASS Redis route failure: publish has no subscriber, explicit sender error", flush=True)
+        marker = f"{RUN_ID}-dead-node-backlog"
+        send_one(sender_wire, sender, receiver, marker)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if marker in redis("XREVRANGE", "chat:route:stream:B",
+                               "+", "-", "COUNT", "1"):
+                break
+            time.sleep(0.1)
+        else:
+            raise AssertionError("dead-node Stream route was not retained")
+        print("PASS dead-node route retained in Stream until lease expires", flush=True)
         time.sleep(22)
         assert redis("TTL", "chat:node:B") == "-2"
         # Lookup cleans stale presence atomically; no manual Redis edits.

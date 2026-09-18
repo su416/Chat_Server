@@ -28,9 +28,21 @@ void DBThreadPool::submitVoid(function<void()> task)
     _cv.notify_one();
 }
 
+bool DBThreadPool::trySubmitDurable(function<void()> task, size_t maxQueued)
+{
+    if (!task || maxQueued == 0) return false;
+    {
+        lock_guard<mutex> lg(_mutex);
+        if (!_running || _tasks.size() >= maxQueued) return false;
+        _tasks.emplace(std::move(task));
+    }
+    _cv.notify_one();
+    return true;
+}
+
 void DBThreadPool::workerLoop()
 {
-    while (_running)
+    while (true)
     {
         function<void()> task;
         {
@@ -43,7 +55,11 @@ void DBThreadPool::workerLoop()
             task = std::move(_tasks.front());
             _tasks.pop();
         }
-        task();
+        try { task(); }
+        catch (const std::exception& error) {
+            LOG_ERROR << "DBThreadPool task failed: " << error.what();
+        }
+        catch (...) { LOG_ERROR << "DBThreadPool task failed: unknown exception"; }
     }
 }
 

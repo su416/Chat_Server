@@ -10,6 +10,8 @@
 #include "config.hpp"
 #include "gateway/delivery_id.hpp"
 #include <boost/any.hpp>
+#include <csignal>
+#include <cstdlib>
 #include <future>
 
 using namespace std;
@@ -61,6 +63,7 @@ ChatService::ChatService()
     if (!_route.start([this](cluster::RoutedMessage message) {
             return handleRoutedMessage(std::move(message));
         })) LOG_ERROR << "ROUTE_STREAM_CONSUMER failed";
+    recoverAtStartup();
 }
 
 // 服务器异常，业务重置方法
@@ -234,6 +237,8 @@ void ChatService::login(const TcpConnectionPtr &conn, json &js, Timestamp time)
             }
 
             sendTcpJson(conn, response);
+            if (auto current = _sessionManager.sessionForConnection(conn))
+                recoverForSession(current);
         }
     }
     else
@@ -288,9 +293,9 @@ void ChatService::loginout(const TcpConnectionPtr &conn, json &js, Timestamp tim
         return;
     }
 
-    const auto cancelled = _pendingDeliveries.cancelConnection(conn);
-    if (cancelled)
-        LOG_WARN << "DELIVERY_FAILED disconnected session count=" << cancelled;
+    const auto suspended = _pendingDeliveries.suspendConnection(conn);
+    if (!suspended.empty())
+        LOG_INFO << "DELIVERY_WAITING_SESSION count=" << suspended.size();
 
     syncServerConnections();
 
@@ -302,9 +307,9 @@ void ChatService::loginout(const TcpConnectionPtr &conn, json &js, Timestamp tim
 // 处理客户端异常退出
 void ChatService::clientCloseException(const TcpConnectionPtr &conn)
 {
-    const auto cancelled = _pendingDeliveries.cancelConnection(conn);
-    if (cancelled)
-        LOG_WARN << "DELIVERY_FAILED disconnected session count=" << cancelled;
+    const auto suspended = _pendingDeliveries.suspendConnection(conn);
+    if (!suspended.empty())
+        LOG_INFO << "DELIVERY_WAITING_SESSION count=" << suspended.size();
     auto session = _sessionManager.sessionForConnection(conn);
     auto userId = _sessionManager.unbindConnection(conn);
     if (!userId)
@@ -397,24 +402,14 @@ void ChatService::oneChat(const TcpConnectionPtr &conn, json &js, Timestamp time
                         return;
                     }
 
-                    const auto deliveryId = _pendingDeliveries.nextDeliveryId();
-                    gateway::MessageEnvelope delivery(
-                        ONE_CHAT_MSG, request,
-                        protocol::WireProtocol::Undetermined, deliveryId);
-                    if (!_pendingDeliveries.track(currentSession, delivery))
-                    {
-                        if (auto sender = weakSender.lock())
-                        {
-                            sendTcpJson(sender, json{{"msgid", ONE_CHAT_MSG_ACK},
-                                                     {"errno", 4},
-                                                     {"errmsg", "reliable delivery capacity exhausted"}});
-                        }
-                        return;
-                    }
-                    recordHistory();
-                    LOG_DEBUG << "DELIVERY_SEND id=" << deliveryId
-                              << " receiver=" << toid;
-                    ChatServer::sendResponse(target, delivery);
+                    persistAndDeliver(currentSession, request, "",
+                        [weakSender, recordHistory](bool accepted) {
+                            if (accepted) { recordHistory(); return; }
+                            if (auto sender = weakSender.lock())
+                                sendTcpJson(sender, json{{"msgid", ONE_CHAT_MSG_ACK},
+                                    {"errno", 4},
+                                    {"errmsg", "durable delivery unavailable"}});
+                        });
                 });
             return;
         }
@@ -724,21 +719,26 @@ cluster::RouteOutcome ChatService::handleRoutedMessage(cluster::RoutedMessage me
     if (!loop) { ++_routeFailed; return cluster::RouteOutcome::Retry; }
     auto result = std::make_shared<std::promise<cluster::RouteOutcome>>();
     auto future = result->get_future();
-    auto expired = std::make_shared<std::atomic<bool>>(false);
-    loop->queueInLoop([this, message = std::move(message), result, expired]() mutable {
-        if (expired->load()) return;
-        try { result->set_value(processRoutedMessage(std::move(message))); }
-        catch (...) { result->set_value(cluster::RouteOutcome::Retry); }
+    auto finished = std::make_shared<std::atomic<bool>>(false);
+    loop->queueInLoop([this, message = std::move(message), result, finished]() mutable {
+        if (finished->load()) return;
+        auto complete = [result, finished](cluster::RouteOutcome outcome) {
+            if (!finished->exchange(true)) result->set_value(outcome);
+        };
+        try { processRoutedMessage(std::move(message), complete); }
+        catch (...) { complete(cluster::RouteOutcome::Retry); }
     });
     if (future.wait_for(std::chrono::seconds(3)) == std::future_status::ready)
         return future.get();
-    expired->store(true);
+    finished->store(true);
     ++_routeFailed;
     LOG_ERROR << "ROUTE_ACCEPT_TIMEOUT";
-    return cluster::RouteOutcome::Retry;
+    return cluster::RouteOutcome::RetryInfrastructure;
 }
 
-cluster::RouteOutcome ChatService::processRoutedMessage(cluster::RoutedMessage message)
+void ChatService::processRoutedMessage(
+    cluster::RoutedMessage message,
+    std::function<void(cluster::RouteOutcome)> complete)
 {
     auto owner = _presence.lookupUser(message.receiverUserId);
     auto session = _sessionManager.sessionForUser(message.receiverUserId);
@@ -747,17 +747,41 @@ cluster::RouteOutcome ChatService::processRoutedMessage(cluster::RoutedMessage m
         owner.owner.sessionId == session->id() &&
         _presence.ownsUser(message.receiverUserId, session->id()))
     {
-        if (message.messageType == ONE_CHAT_MSG)
-            return deliverRoutedOneChat(session, message);
+        if (message.messageType == ONE_CHAT_MSG) {
+            auto target = session->connection();
+            if (!target) { complete(cluster::RouteOutcome::Retry); return; }
+            const auto* state = boost::any_cast<protocol::ProtocolState>(&target->getContext());
+            if (state && state->selected() == protocol::WireProtocol::Binary) {
+                const auto marked = _route.markAccepted(message.routeId);
+                if (marked == cluster::RouteTransport::DedupResult::Error)
+                    complete(cluster::RouteOutcome::Retry);
+                else {
+                    if (marked == cluster::RouteTransport::DedupResult::New)
+                        ChatServer::sendResponse(target, message.payload);
+                    complete(cluster::RouteOutcome::Accepted);
+                }
+                return;
+            }
+            persistAndDeliver(session, message.payload, message.routeId,
+                [complete = std::move(complete)](bool accepted) {
+                    complete(accepted ? cluster::RouteOutcome::Accepted
+                                      : cluster::RouteOutcome::RetryInfrastructure);
+                });
+            return;
+        }
         if (auto target = session->connection()) {
             const auto marked = _route.markAccepted(message.routeId);
-            if (marked == cluster::RouteTransport::DedupResult::Error)
-                return cluster::RouteOutcome::Retry;
+            if (marked == cluster::RouteTransport::DedupResult::Error) {
+                complete(cluster::RouteOutcome::Retry);
+                return;
+            }
             if (marked == cluster::RouteTransport::DedupResult::New)
                 ChatServer::sendResponse(target, message.payload);
-            return cluster::RouteOutcome::Accepted;
+            complete(cluster::RouteOutcome::Accepted);
+            return;
         }
-        return cluster::RouteOutcome::Retry;
+        complete(cluster::RouteOutcome::Retry);
+        return;
     }
     ++_routeStale;
     LOG_WARN << "ROUTE_STALE id=" << message.routeId
@@ -769,63 +793,187 @@ cluster::RouteOutcome ChatService::processRoutedMessage(cluster::RoutedMessage m
         message.hops = 1;
         if (_route.send(message)) {
             ++_routeRemote;
-            return cluster::RouteOutcome::Accepted;
+            complete(cluster::RouteOutcome::Accepted);
+            return;
         }
     }
     ++_routeFailed;
     // Keep the PEL entry for bounded reclaims. Dead-letter after max attempts.
-    return cluster::RouteOutcome::Retry;
+    complete(cluster::RouteOutcome::Retry);
 }
 
-cluster::RouteOutcome ChatService::deliverRoutedOneChat(
+bool ChatService::activateDurable(
     const std::shared_ptr<const gateway::Session>& session,
-    const cluster::RoutedMessage& message)
+    const gateway::DurablePendingRecord& record)
 {
     auto target = session ? session->connection() : nullptr;
-    if (!target || !target->connected()) {
-        ++_routeFailed;
-        return cluster::RouteOutcome::Retry;
-    }
+    if (!target || !target->connected()) return false;
     if (target->getLoop() != muduo::net::EventLoop::getEventLoopOfCurrentThread())
-    {
-        ++_routeFailed;
-        return cluster::RouteOutcome::Retry;
-    }
+        return false;
     if (_sessionManager.sessionForUser(session->userId()) != session ||
-        !_presence.ownsUser(session->userId(), session->id()))
-    {
-        ++_routeStale;
-        return cluster::RouteOutcome::Retry;
+        !_presence.ownsUser(session->userId(), session->id())) return false;
+    try {
+        auto payload = json::parse(record.payload);
+        gateway::MessageEnvelope delivery(
+            record.messageType, std::move(payload),
+            protocol::WireProtocol::Undetermined, record.deliveryId);
+        const auto restored = _pendingDeliveries.restore(
+            session, delivery, record.retryCount);
+        if (restored == gateway::RestoreResult::CapacityExceeded) return false;
+        if (restored == gateway::RestoreResult::Inserted) {
+            LOG_INFO << "DURABLE_DELIVERY_SEND id=" << record.deliveryId
+                     << " user=" << record.receiverUserId;
+            ChatServer::sendResponse(target, delivery);
+        }
+        return true;
+    } catch (...) {
+        LOG_ERROR << "DURABLE_DELIVERY invalid payload id=" << record.deliveryId;
+        return false;
     }
-    const auto* state = boost::any_cast<protocol::ProtocolState>(&target->getContext());
-    if (state && state->selected() == protocol::WireProtocol::Binary)
-    {
-        const auto marked = _route.markAccepted(message.routeId);
-        if (marked == cluster::RouteTransport::DedupResult::Error)
-            return cluster::RouteOutcome::Retry;
-        if (marked == cluster::RouteTransport::DedupResult::New)
-            ChatServer::sendResponse(target, message.payload);
-        return cluster::RouteOutcome::Accepted;
+}
+
+void ChatService::persistAndDeliver(
+    const std::shared_ptr<const gateway::Session>& session,
+    const json& payload, const std::string& routeId,
+    std::function<void(bool)> complete)
+{
+    auto target = session ? session->connection() : nullptr;
+    if (!target || !complete) { if (complete) complete(false); return; }
+    auto* loop = target->getLoop();
+    std::weak_ptr<const gateway::Session> weakSession = session;
+    const auto node = _presence.nodeId();
+    const auto user = session->userId();
+    const auto encoded = payload.dump();
+    auto completion = std::make_shared<std::function<void(bool)>>(std::move(complete));
+    const bool queued = DBThreadPool::instance()->trySubmitDurable(
+        [this, loop, weakSession, routeId, node, user, encoded,
+         completion]() mutable {
+            gateway::PersistResult saved;
+            try {
+                // Fault hooks are opt-in and used only by the integration
+                // harness; normal deployments never set these variables.
+                if (std::getenv("CHAT_PHASE6_TEST_REJECT_PERSIST")) {
+                    LOG_WARN << "DURABLE_TEST_REJECT_PERSIST route=" << routeId;
+                } else {
+                    saved = _durablePendingModel.persist(
+                        routeId, node, user, ONE_CHAT_MSG, encoded,
+                        gateway::unixMillis());
+                }
+            } catch (const std::exception& error) {
+                LOG_ERROR << "DURABLE_PERSIST exception=" << error.what();
+            } catch (...) {
+                LOG_ERROR << "DURABLE_PERSIST unknown exception";
+            }
+            if (saved.status != gateway::PersistStatus::Error &&
+                std::getenv("CHAT_PHASE6_TEST_STOP_AFTER_PERSIST")) {
+                LOG_WARN << "DURABLE_TEST_STOP_AFTER_PERSIST id="
+                         << saved.record.deliveryId;
+                std::raise(SIGSTOP);
+            }
+            loop->queueInLoop([this, weakSession, routeId,
+                               saved = std::move(saved),
+                               completion]() mutable {
+                if (saved.status == gateway::PersistStatus::Error) {
+                    ++_durableDbFailed;
+                    (*completion)(false);
+                    return;
+                }
+                if (saved.status == gateway::PersistStatus::Inserted)
+                    ++_durablePersisted;
+                if (!routeId.empty() &&
+                    _route.markAccepted(routeId) ==
+                        cluster::RouteTransport::DedupResult::Error) {
+                    ++_routeFailed;
+                    (*completion)(false);
+                    return;
+                }
+                // A duplicate may arrive after the client ACK. Still update
+                // Phase 5 dedup metrics before accepting its Stream entry.
+                if (saved.record.state == gateway::DurableState::Acked ||
+                    saved.record.state == gateway::DurableState::Expired) {
+                    (*completion)(true);
+                    return;
+                }
+                // Existing row may have been sent before the crash. The durable
+                // scanner, not this duplicate route, controls its next attempt.
+                if (saved.status == gateway::PersistStatus::Inserted) {
+                    if (auto current = weakSession.lock())
+                        activateDurable(current, saved.record);
+                }
+                (*completion)(true); // Durable source exists even if Session changed.
+            });
+        });
+    if (!queued) {
+        ++_durableDbFailed;
+        (*completion)(false);
     }
-    const auto deliveryId = _pendingDeliveries.nextDeliveryId();
-    gateway::MessageEnvelope delivery(ONE_CHAT_MSG, message.payload,
-                                      protocol::WireProtocol::Undetermined, deliveryId);
-    if (!_pendingDeliveries.track(session, delivery))
-    {
-        ++_routeFailed;
-        LOG_WARN << "ROUTE_FAILED pending capacity user=" << session->userId();
-        return cluster::RouteOutcome::Retry;
-    }
-    const auto marked = _route.markAccepted(message.routeId);
-    if (marked != cluster::RouteTransport::DedupResult::New) {
-        _pendingDeliveries.cancel(deliveryId);
-        return marked == cluster::RouteTransport::DedupResult::Duplicate
-            ? cluster::RouteOutcome::Accepted : cluster::RouteOutcome::Retry;
-    }
-    LOG_INFO << "ROUTE_DELIVERY route_target=" << _presence.nodeId()
-             << " delivery_id=" << deliveryId;
-    ChatServer::sendResponse(target, delivery);
-    return cluster::RouteOutcome::Accepted;
+}
+
+void ChatService::recoverAtStartup()
+{
+    const auto node = _presence.nodeId();
+    if (!DBThreadPool::instance()->trySubmitDurable([this, node]() {
+            auto count = _durablePendingModel.recoverStartup(node, gateway::unixMillis());
+            if (count) {
+                _durableRecovered += *count;
+                LOG_INFO << "DURABLE_STARTUP_RECOVERY node=" << node
+                         << " pending=" << *count;
+            } else {
+                ++_durableDbFailed;
+                LOG_ERROR << "DURABLE_STARTUP_RECOVERY failed node=" << node;
+            }
+        }))
+        ++_durableDbFailed;
+}
+
+void ChatService::recoverForSession(
+    const std::shared_ptr<const gateway::Session>& session)
+{
+    auto target = session ? session->connection() : nullptr;
+    if (!target) return;
+    auto* loop = target->getLoop();
+    const auto user = session->userId();
+    const auto node = _presence.nodeId();
+    std::weak_ptr<const gateway::Session> weak = session;
+    if (!DBThreadPool::instance()->trySubmitDurable(
+        [this, loop, weak, user, node]() {
+            auto rows = _durablePendingModel.claimForUser(
+                user, node, gateway::unixMillis());
+            loop->queueInLoop([this, weak, rows = std::move(rows)]() mutable {
+                if (!rows) {
+                    ++_durableDbFailed;
+                    LOG_ERROR << "DURABLE_SESSION_RECOVERY failed";
+                    return;
+                }
+                auto current = weak.lock();
+                if (!current || _sessionManager.sessionForUser(current->userId()) != current ||
+                    !_presence.ownsUser(current->userId(), current->id())) {
+                    // A slower old-node login claim must not strand the row
+                    // after a newer login has become the Redis owner.
+                    if (current && !rows->empty()) {
+                        auto owner = _presence.lookupUser(current->userId());
+                        if (owner.status == cluster::LookupStatus::Hit &&
+                            owner.owner.nodeId != _presence.nodeId()) {
+                            const auto oldNode = _presence.nodeId();
+                            const auto newNode = owner.owner.nodeId;
+                            auto claimed = std::move(*rows);
+                            if (!DBThreadPool::instance()->trySubmitDurable(
+                                [this, claimed = std::move(claimed), oldNode, newNode]() {
+                                    for (const auto& row : claimed)
+                                        if (!_durablePendingModel.transferOwner(
+                                                row.deliveryId, oldNode, newNode,
+                                                gateway::unixMillis()))
+                                            ++_durableDbFailed;
+                                })) ++_durableDbFailed;
+                        }
+                    }
+                    return;
+                }
+                _durableRecovered += rows->size();
+                if (!rows->empty()) scanReliableDeliveries();
+            });
+        }))
+        ++_durableDbFailed;
 }
 
 // 查询单聊历史消息
@@ -888,10 +1036,32 @@ void ChatService::messageAck(const TcpConnectionPtr &conn, json &js, Timestamp)
 {
     const auto deliveryId = gateway::parseDeliveryId(js);
     if (!deliveryId) return; // Decoder 已拒绝非法 wire；此处作防御性检查。
-    const auto result = _pendingDeliveries.ack(*deliveryId, conn);
+    const auto result = _pendingDeliveries.validateAck(*deliveryId, conn);
     if (result == gateway::AckResult::Acked)
     {
-        LOG_DEBUG << "DELIVERY_ACK id=" << *deliveryId;
+        auto session = _sessionManager.sessionForConnection(conn);
+        if (!session) return;
+        const int userId = session->userId();
+        const auto id = *deliveryId;
+        auto* loop = conn->getLoop();
+        if (!DBThreadPool::instance()->trySubmitDurable([this, loop, id, userId]() {
+                const auto persisted = _durablePendingModel.markAcked(
+                    id, userId, gateway::unixMillis());
+                loop->queueInLoop([this, id, persisted]() {
+                    if (persisted == gateway::DurableAckStatus::Error) {
+                        ++_durableDbFailed;
+                        LOG_ERROR << "DURABLE_ACK failed id=" << id;
+                        return;
+                    }
+                    if (_pendingDeliveries.completeDurableAck(id)) {
+                        ++_durableAcked;
+                        LOG_DEBUG << "DELIVERY_ACK id=" << id;
+                    }
+                });
+            })) {
+            ++_durableDbFailed;
+            LOG_ERROR << "DURABLE_ACK queue full id=" << id;
+        }
     }
     else if (result == gateway::AckResult::Unknown)
     {
@@ -905,24 +1075,127 @@ void ChatService::messageAck(const TcpConnectionPtr &conn, json &js, Timestamp)
 
 void ChatService::scanReliableDeliveries()
 {
-    for (const auto& retry : _pendingDeliveries.scanExpired())
-    {
-        auto session = retry.session.lock();
-        if (!session || _sessionManager.sessionForUser(retry.receiverId) != session)
-            continue;
-        auto connection = session->connection();
-        if (!connection || !connection->connected())
-            continue;
-        if (!_presence.ownsUser(retry.receiverId, session->id()))
-        {
-            _pendingDeliveries.cancelConnection(connection);
-            continue;
-        }
-        LOG_DEBUG << "DELIVERY_TIMEOUT id=" << *retry.envelope.deliveryId();
-        LOG_DEBUG << "DELIVERY_RETRY id=" << *retry.envelope.deliveryId()
-                  << " count=" << retry.retryCount;
-        ChatServer::sendResponse(connection, retry.envelope);
+    if (_durableScanInFlight.exchange(true)) return;
+    auto* mainLoop = _mainLoop.load();
+    if (!mainLoop) { _durableScanInFlight = false; return; }
+    const auto node = _presence.nodeId();
+    static std::uint64_t scanCount = 0; // called only on the main EventLoop
+    const bool housekeeping = (++scanCount % 60 == 0);
+    if (!DBThreadPool::instance()->trySubmitDurable([this, mainLoop, node, housekeeping]() {
+            const auto now = gateway::unixMillis();
+            if (housekeeping) {
+                auto expired = _durablePendingModel.expireOverdue(now);
+                if (!expired) ++_durableDbFailed;
+                if (!_durablePendingModel.cleanupTerminal(
+                        now - 7ULL * 24 * 60 * 60 * 1000))
+                    ++_durableDbFailed;
+            }
+            auto due = _durablePendingModel.dueForNode(node, now);
+            mainLoop->queueInLoop([this, due = std::move(due)]() mutable {
+                _durableScanInFlight = false;
+                if (!due) { ++_durableDbFailed; return; }
+                for (auto& row : *due) handleDueDurableRecord(std::move(row));
+            });
+        })) {
+        _durableScanInFlight = false;
+        ++_durableDbFailed;
     }
+}
+
+void ChatService::handleDueDurableRecord(gateway::DurablePendingRecord record)
+{
+    auto session = _sessionManager.sessionForUser(record.receiverUserId);
+    auto connection = session ? session->connection() : nullptr;
+    auto* loop = connection ? connection->getLoop() : _mainLoop.load();
+    if (!loop) return;
+    std::weak_ptr<const gateway::Session> weak = session;
+    loop->queueInLoop([this, weak, record = std::move(record), loop]() mutable {
+        auto current = weak.lock();
+        auto target = current ? current->connection() : nullptr;
+        const auto now = gateway::unixMillis();
+        const auto node = _presence.nodeId();
+        if (record.expireAtMs <= now || record.retryCount >= 2) {
+            if (!DBThreadPool::instance()->trySubmitDurable(
+                [this, loop, id = record.deliveryId, now]() {
+                    const bool ok = _durablePendingModel.markExpired(id, now);
+                    loop->queueInLoop([this, id, ok]() {
+                        if (ok) _pendingDeliveries.cancel(id);
+                        else ++_durableDbFailed;
+                    });
+                })) ++_durableDbFailed;
+            return;
+        }
+        const auto* state = target
+            ? boost::any_cast<protocol::ProtocolState>(&target->getContext()) : nullptr;
+        if (!target || !target->connected() ||
+            _sessionManager.sessionForUser(record.receiverUserId) != current ||
+            !_presence.ownsUser(record.receiverUserId, current->id()) ||
+            (state && state->selected() == protocol::WireProtocol::Binary)) {
+            _pendingDeliveries.suspend(record.deliveryId);
+            auto owner = _presence.lookupUser(record.receiverUserId);
+            if (owner.status == cluster::LookupStatus::Hit &&
+                owner.owner.nodeId != node) {
+                if (!DBThreadPool::instance()->trySubmitDurable(
+                    [this, id = record.deliveryId, node,
+                     newNode = owner.owner.nodeId]() {
+                        if (!_durablePendingModel.transferOwner(
+                                id, node, newNode, gateway::unixMillis()))
+                            ++_durableDbFailed;
+                    })) ++_durableDbFailed;
+                return;
+            }
+            if (!DBThreadPool::instance()->trySubmitDurable(
+                [this, id = record.deliveryId, node,
+                 expected = record.nextRetryAtMs]() {
+                    if (!_durablePendingModel.markWaiting(
+                            id, node, expected, gateway::unixMillis()))
+                        ++_durableDbFailed;
+                })) ++_durableDbFailed;
+            return;
+        }
+        json decoded;
+        try { decoded = json::parse(record.payload); }
+        catch (...) {
+            LOG_ERROR << "DURABLE_DELIVERY invalid payload id=" << record.deliveryId;
+            if (!DBThreadPool::instance()->trySubmitDurable(
+                [this, id = record.deliveryId]() {
+                    if (!_durablePendingModel.markExpired(id, gateway::unixMillis()))
+                        ++_durableDbFailed;
+                })) ++_durableDbFailed;
+            return;
+        }
+        gateway::MessageEnvelope delivery(
+            record.messageType, std::move(decoded),
+            protocol::WireProtocol::Undetermined, record.deliveryId);
+        const auto restored = _pendingDeliveries.restore(
+            current, delivery, record.retryCount);
+        if (restored == gateway::RestoreResult::CapacityExceeded) return;
+        std::weak_ptr<const gateway::Session> weakCurrent = current;
+        if (!DBThreadPool::instance()->trySubmitDurable(
+            [this, loop, weakCurrent, record, delivery]() {
+                const auto now = gateway::unixMillis();
+                const bool persisted = _durablePendingModel.markRetry(
+                    record.deliveryId, _presence.nodeId(), record.retryCount,
+                    now + 2000, now);
+                loop->queueInLoop([this, weakCurrent, delivery, record, persisted]() {
+                    if (!persisted) {
+                        ++_durableDbFailed;
+                        _pendingDeliveries.suspend(record.deliveryId);
+                        return;
+                    }
+                    auto current = weakCurrent.lock();
+                    auto target = current ? current->connection() : nullptr;
+                    if (!target || !target->connected() ||
+                        _sessionManager.sessionForUser(record.receiverUserId) != current ||
+                        !_presence.ownsUser(record.receiverUserId, current->id())) return;
+                    if (!_pendingDeliveries.markDurableRetry(
+                            record.deliveryId, record.retryCount + 1)) return;
+                    LOG_INFO << "DURABLE_DELIVERY_RETRY id=" << record.deliveryId
+                             << " count=" << record.retryCount + 1;
+                    ChatServer::sendResponse(target, delivery);
+                });
+            })) ++_durableDbFailed;
+    });
 }
 
 void ChatService::heartbeatPresence()
@@ -968,5 +1241,9 @@ void ChatService::logDeliveryMetrics() const
              << " pending=" << metrics.pending
              << " peak=" << metrics.pendingPeak
              << " pending_bytes=" << metrics.pendingBytes
-             << " peak_bytes=" << metrics.pendingPeakBytes;
+             << " peak_bytes=" << metrics.pendingPeakBytes
+             << " durable_persisted=" << _durablePersisted.load()
+             << " durable_recovered=" << _durableRecovered.load()
+             << " durable_acked=" << _durableAcked.load()
+             << " durable_db_failed=" << _durableDbFailed.load();
 }

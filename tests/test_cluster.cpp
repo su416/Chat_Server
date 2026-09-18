@@ -184,6 +184,34 @@ TEST_F(ClusterTest, UnackedPendingIsClaimedAfterConsumerRestart)
     redis.command({"DEL", stream});
 }
 
+TEST_F(ClusterTest, InfrastructureFailureNeverAcknowledgesOrDeadLetters)
+{
+    const auto stream = cluster::RouteTransport::streamFor(nodeB);
+    cluster::RouteTransport source(redis, nodeA, "source");
+    cluster::RouteTransport target(redis, nodeB, "infra");
+    cluster::RoutedMessage route{"infra-" + std::to_string(userId), nodeA, nodeB,
+        6, userId, userId + 1, 0, {{"msgid", 6}, {"msg", "db-down"}}};
+    std::atomic<int> calls{0};
+    std::atomic<bool> recovered{false};
+    ASSERT_TRUE(target.start([&](cluster::RoutedMessage) {
+        ++calls;
+        return recovered ? cluster::RouteOutcome::Accepted
+                         : cluster::RouteOutcome::RetryInfrastructure;
+    }));
+    ASSERT_TRUE(source.send(route));
+    for (int i = 0; i < 145 && calls.load() < 6; ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    EXPECT_GE(calls.load(), 6); // Exceeds the normal Phase 5 retry bound.
+    EXPECT_EQ(target.metrics().acked, 0u);
+    EXPECT_EQ(target.metrics().pending, 1u);
+    recovered = true;
+    for (int i = 0; i < 50 && target.metrics().acked == 0; ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    EXPECT_EQ(target.metrics().acked, 1u);
+    target.stop();
+    redis.command({"DEL", stream});
+}
+
 TEST_F(ClusterTest, TrimmingPreservesOlderUnackedPayload)
 {
     const auto stream = cluster::RouteTransport::streamFor(nodeB);

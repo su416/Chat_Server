@@ -41,6 +41,8 @@ public:
 
     // 提交一个无返回值的任务（fire-and-forget）
     void submitVoid(function<void()> task);
+    // Durable delivery work must fail closed rather than grow an unbounded queue.
+    bool trySubmitDurable(function<void()> task, size_t maxQueued = 1024);
 
     void shutdown();
 

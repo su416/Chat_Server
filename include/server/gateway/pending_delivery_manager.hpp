@@ -38,6 +38,7 @@ struct DeliveryMetrics
 };
 
 enum class AckResult { Acked, Unknown, WrongSession };
+enum class RestoreResult { Inserted, AlreadyTracked, CapacityExceeded };
 
 struct RetryAction
 {
@@ -61,6 +62,19 @@ public:
                Clock::time_point now = Clock::now());
     AckResult ack(std::uint64_t deliveryId,
                   const muduo::net::TcpConnectionPtr& connection);
+    AckResult validateAck(std::uint64_t deliveryId,
+                          const muduo::net::TcpConnectionPtr& connection) const;
+    bool completeDurableAck(std::uint64_t deliveryId);
+    RestoreResult restore(const std::shared_ptr<const Session>& session,
+                          const MessageEnvelope& envelope,
+                          std::uint32_t retryCount,
+                          Clock::time_point now = Clock::now());
+    bool markDurableRetry(std::uint64_t deliveryId, std::uint32_t retryCount,
+                          Clock::time_point now = Clock::now());
+    bool suspend(std::uint64_t deliveryId);
+    std::vector<std::uint64_t> suspendConnection(
+        const muduo::net::TcpConnectionPtr& connection);
+    bool contains(std::uint64_t deliveryId) const;
     bool cancel(std::uint64_t deliveryId);
     std::vector<RetryAction> scanExpired(Clock::time_point now = Clock::now());
     std::size_t cancelConnection(

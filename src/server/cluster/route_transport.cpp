@@ -180,14 +180,6 @@ bool RouteTransport::ack(const std::string& entryId) {
 bool RouteTransport::handleEntry(const std::string& entryId,
                                  const std::string& payload, int attempts) {
     ++_consumed;
-    if (attempts >= maxAttempts) {
-        auto parked = _redis.command({"XADD", "chat:route:dead:" + _nodeId,
-            "MAXLEN", "~", "1000", "*", "stream_id", entryId, "body", payload});
-        if (!isString(parked.get())) { ++_failed; return false; }
-        LOG_ERROR << "ROUTE_TERMINAL stream_id=" << entryId << " attempts=" << attempts;
-        ++_failed;
-        return ack(entryId);
-    }
     auto message = RoutedMessage::decode(payload);
     if (!message) {
         LOG_ERROR << "ROUTE_INVALID stream_id=" << entryId;
@@ -198,6 +190,19 @@ bool RouteTransport::handleEntry(const std::string& entryId,
     if (outcome == RouteOutcome::Accepted) return ack(entryId);
     if (outcome == RouteOutcome::Terminal) { ++_failed; return ack(entryId); }
     ++_retried;
+    if (outcome == RouteOutcome::RetryInfrastructure) {
+        LOG_ERROR << "ROUTE_INFRASTRUCTURE_RETRY stream_id=" << entryId
+                  << " attempts=" << attempts;
+        return false; // DB outage cannot acknowledge or dead-letter this route.
+    }
+    if (attempts >= maxAttempts) {
+        auto parked = _redis.command({"XADD", "chat:route:dead:" + _nodeId,
+            "MAXLEN", "~", "1000", "*", "stream_id", entryId, "body", payload});
+        if (!isString(parked.get())) { ++_failed; return false; }
+        LOG_ERROR << "ROUTE_TERMINAL stream_id=" << entryId << " attempts=" << attempts;
+        ++_failed;
+        return ack(entryId);
+    }
     return false;
 }
 void RouteTransport::consume() {
