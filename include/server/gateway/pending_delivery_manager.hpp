@@ -80,6 +80,8 @@ public:
     std::size_t cancelConnection(
         const muduo::net::TcpConnectionPtr& connection);
     DeliveryMetrics metrics() const;
+    std::size_t availableSlots() const;
+    std::size_t availableBytes() const;
 
 private:
     struct PendingMessage

@@ -13,12 +13,25 @@
 #include <csignal>
 #include <cstdlib>
 #include <future>
+#include <algorithm>
 
 using namespace std;
 using namespace muduo;
 
 namespace
 {
+gateway::DeliveryPolicy deliveryPolicy()
+{
+    gateway::DeliveryPolicy policy;
+    if (const char* value = std::getenv("CHAT_PHASE7_TEST_MAX_PENDING")) {
+        try {
+            const auto max = std::stoul(value);
+            if (max > 0 && max <= 10000) policy.maxPending = max;
+        } catch (...) { /* keep production default */ }
+    }
+    return policy;
+}
+
 void sendTcpJson(const TcpConnectionPtr &conn, const json &js)
 {
     ChatServer::sendResponse(conn, js);
@@ -35,7 +48,8 @@ ChatService *ChatService::instance()
 
 // 注册消息以及对应的Handler回调操作
 ChatService::ChatService()
-    : _presence(_redis, Config::instance().getNodeId()),
+    : _pendingDeliveries(deliveryPolicy()),
+      _presence(_redis, Config::instance().getNodeId()),
       _route(_redis, Config::instance().getNodeId(), _presence.generation())
 {
     // 协议协商（msgid=0）——客户端声明偏好，服务端确认
@@ -237,8 +251,9 @@ void ChatService::login(const TcpConnectionPtr &conn, json &js, Timestamp time)
             }
 
             sendTcpJson(conn, response);
-            if (auto current = _sessionManager.sessionForConnection(conn))
-                recoverForSession(current);
+            // Login success is independent of inbox size. The main-loop
+            // scanner claims a bounded batch asynchronously after this ACK.
+            enqueueInbox(id);
         }
     }
     else
@@ -296,7 +311,6 @@ void ChatService::loginout(const TcpConnectionPtr &conn, json &js, Timestamp tim
     const auto suspended = _pendingDeliveries.suspendConnection(conn);
     if (!suspended.empty())
         LOG_INFO << "DELIVERY_WAITING_SESSION count=" << suspended.size();
-
     syncServerConnections();
 
     // 旧节点迟到 logout 不得删除新节点 owner，也不得把 MySQL 展示状态写离线。
@@ -415,10 +429,10 @@ void ChatService::oneChat(const TcpConnectionPtr &conn, json &js, Timestamp time
         }
     }
 
-    recordHistory();
-
     const auto status = routeToUser(toid, fromid, ONE_CHAT_MSG, js);
-    if (status == RouteStatus::Offline) storeOffline(fromid, toid, js);
+    if (status == RouteStatus::Offline)
+        storeDurableOffline(fromid, toid, js, conn, recordHistory);
+    else if (status == RouteStatus::Sent) recordHistory();
     else if (status == RouteStatus::Error)
         sendTcpJson(conn, json{{"msgid", ONE_CHAT_MSG_ACK}, {"errno", 6},
                                {"errmsg", "cross-node route unavailable"}});
@@ -646,7 +660,7 @@ void ChatService::groupChat(const TcpConnectionPtr &conn, json &js, Timestamp ti
             continue;
         }
         const auto status = routeToUser(id, userid, GROUP_CHAT_MSG, js);
-        if (status == RouteStatus::Offline) storeOffline(userid, id, js);
+        if (status == RouteStatus::Offline) storeLegacyGroupOffline(userid, id, js);
     }
 }
 
@@ -688,12 +702,58 @@ ChatService::RouteStatus ChatService::routeToUser(
     return RouteStatus::Sent;
 }
 
-void ChatService::storeOffline(int senderId, int receiverId, const json& payload)
+void ChatService::storeLegacyGroupOffline(int senderId, int receiverId, const json& payload)
 {
     const auto encoded = payload.dump();
     DBThreadPool::instance()->submitVoid([this, senderId, receiverId, encoded]() {
         _chatHistoryModel.insertOneChat(senderId, receiverId, encoded, 2);
     });
+}
+
+void ChatService::storeDurableOffline(
+    int senderId, int receiverId, const json& payload,
+    const TcpConnectionPtr& sender, std::function<void()> accepted)
+{
+    (void)senderId;
+    const auto encoded = payload.dump();
+    std::weak_ptr<TcpConnection> weakSender = sender;
+    auto* senderLoop = sender->getLoop();
+    auto complete = [this, weakSender, senderLoop,
+                     receiverId, accepted = std::move(accepted)](
+                        gateway::PersistResult saved) mutable {
+        senderLoop->queueInLoop([this, weakSender, receiverId,
+                                 saved = std::move(saved), accepted]() mutable {
+            if (saved.status == gateway::PersistStatus::Error) {
+                ++_durableDbFailed;
+                if (auto current = weakSender.lock())
+                    sendTcpJson(current, json{{"msgid", ONE_CHAT_MSG_ACK},
+                        {"errno", 4}, {"errmsg", "durable offline inbox unavailable"}});
+                return;
+            }
+            ++_waitingCreated;
+            LOG_INFO << "OFFLINE_DURABLE_ACCEPT id=" << saved.record.deliveryId
+                     << " user=" << receiverId;
+            accepted();
+            // Covers a receiver login racing with the DB INSERT on this node.
+            if (auto session = _sessionManager.sessionForUser(receiverId);
+                session && _presence.ownsUser(receiverId, session->id())) {
+                enqueueInbox(receiverId);
+            }
+        });
+    };
+    if (!DBThreadPool::instance()->trySubmitDurable(
+        [this, receiverId, encoded, complete = std::move(complete)]() mutable {
+            gateway::PersistResult saved;
+            if (!std::getenv("CHAT_PHASE7_TEST_REJECT_OFFLINE_PERSIST"))
+                saved = _durablePendingModel.persistOffline(
+                    receiverId, ONE_CHAT_MSG, encoded, gateway::unixMillis());
+            complete(std::move(saved));
+        })) {
+        ++_durableDbFailed;
+        if (auto current = weakSender.lock())
+            sendTcpJson(current, json{{"msgid", ONE_CHAT_MSG_ACK},
+                {"errno", 4}, {"errmsg", "durable offline inbox queue unavailable"}});
+    }
 }
 
 cluster::RouteOutcome ChatService::handleRoutedMessage(cluster::RoutedMessage message)
@@ -781,6 +841,48 @@ void ChatService::processRoutedMessage(
             return;
         }
         complete(cluster::RouteOutcome::Retry);
+        return;
+    }
+    if (owner.status == cluster::LookupStatus::Miss &&
+        message.messageType == ONE_CHAT_MSG) {
+        // The target disconnected after the source resolved Presence. Keep
+        // the routeId as the durable idempotency key before Stream XACK.
+        auto* loop = muduo::net::EventLoop::getEventLoopOfCurrentThread();
+        const auto routeId = message.routeId;
+        const auto user = message.receiverUserId;
+        const auto encoded = message.payload.dump();
+        auto completion = std::make_shared<std::function<void(cluster::RouteOutcome)>>(std::move(complete));
+        if (!DBThreadPool::instance()->trySubmitDurable(
+            [this, loop, routeId, user, encoded, completion]() mutable {
+                gateway::PersistResult saved;
+                if (!std::getenv("CHAT_PHASE7_TEST_REJECT_OFFLINE_PERSIST"))
+                    saved = _durablePendingModel.persistOffline(
+                        user, ONE_CHAT_MSG, encoded, gateway::unixMillis(), routeId);
+                loop->queueInLoop([this, routeId, user, saved = std::move(saved),
+                                   completion]() mutable {
+                    if (saved.status == gateway::PersistStatus::Error) {
+                        ++_durableDbFailed;
+                        (*completion)(cluster::RouteOutcome::RetryInfrastructure);
+                        return;
+                    }
+                    if (_route.markAccepted(routeId) ==
+                        cluster::RouteTransport::DedupResult::Error) {
+                        ++_routeFailed;
+                        (*completion)(cluster::RouteOutcome::RetryInfrastructure);
+                        return;
+                    }
+                    if (saved.status == gateway::PersistStatus::Inserted)
+                        ++_waitingCreated;
+                    if (auto session = _sessionManager.sessionForUser(user);
+                        session && _presence.ownsUser(user, session->id())) {
+                        enqueueInbox(user);
+                    }
+                    (*completion)(cluster::RouteOutcome::Accepted);
+                });
+            })) {
+            ++_durableDbFailed;
+            (*completion)(cluster::RouteOutcome::RetryInfrastructure);
+        }
         return;
     }
     ++_routeStale;
@@ -934,12 +1036,32 @@ void ChatService::recoverForSession(
     auto* loop = target->getLoop();
     const auto user = session->userId();
     const auto node = _presence.nodeId();
+    const auto limit = std::min<std::size_t>(32, _pendingDeliveries.availableSlots());
+    const auto maxBytes = _pendingDeliveries.availableBytes();
+    if (!limit || !maxBytes) {
+        std::lock_guard<std::mutex> lock(_inboxMutex);
+        _inboxInFlight.erase(user);
+        return;
+    }
     std::weak_ptr<const gateway::Session> weak = session;
     if (!DBThreadPool::instance()->trySubmitDurable(
-        [this, loop, weak, user, node]() {
-            auto rows = _durablePendingModel.claimForUser(
-                user, node, gateway::unixMillis());
-            loop->queueInLoop([this, weak, rows = std::move(rows)]() mutable {
+        [this, loop, weak, user, node, limit, maxBytes]() {
+            auto migrated = _durablePendingModel.migrateLegacyForUser(
+                user, gateway::unixMillis(), 100);
+            std::optional<std::vector<gateway::DurablePendingRecord>> rows;
+            if (!std::getenv("CHAT_PHASE7_TEST_REJECT_CLAIM"))
+                rows = _durablePendingModel.claimForUser(
+                    user, node, gateway::unixMillis(), limit, maxBytes);
+            loop->queueInLoop([this, weak, user, limit, migrated,
+                               rows = std::move(rows)]() mutable {
+                {
+                    std::lock_guard<std::mutex> lock(_inboxMutex);
+                    _inboxInFlight.erase(user);
+                    if (rows && rows->size() < limit && migrated && *migrated < 100)
+                        _inboxQueued.erase(user);
+                }
+                if (migrated) _legacyMigrated += *migrated;
+                else { ++_legacyFailed; ++_durableDbFailed; }
                 if (!rows) {
                     ++_durableDbFailed;
                     LOG_ERROR << "DURABLE_SESSION_RECOVERY failed";
@@ -969,11 +1091,53 @@ void ChatService::recoverForSession(
                     }
                     return;
                 }
+                _waitingClaimed += rows->size();
                 _durableRecovered += rows->size();
-                if (!rows->empty()) scanReliableDeliveries();
+                // The target I/O loop emits this batch in delivery_id order.
+                // Persisted next_retry_at prevents a concurrent scan from
+                // racing these first sends.
+                for (const auto& row : *rows)
+                    if (activateDurable(current, row)) ++_offlineRecovered;
             });
-        }))
+        })) {
+        std::lock_guard<std::mutex> lock(_inboxMutex);
+        _inboxInFlight.erase(user);
         ++_durableDbFailed;
+    }
+}
+
+void ChatService::scanInboxRecovery()
+{
+    std::vector<int> users;
+    {
+        std::lock_guard<std::mutex> lock(_inboxMutex);
+        const auto candidates = _inboxOrder.size();
+        for (std::size_t i = 0; i < candidates && users.size() < 4; ++i) {
+            const int user = _inboxOrder.front();
+            _inboxOrder.pop_front();
+            if (!_inboxQueued.count(user)) continue;
+            _inboxOrder.push_back(user); // fair round-robin across users
+            if (_inboxInFlight.insert(user).second) users.push_back(user);
+        }
+    }
+    for (int user : users) {
+        auto session = _sessionManager.sessionForUser(user);
+        if (!session || !_presence.ownsUser(user, session->id())) {
+            std::lock_guard<std::mutex> lock(_inboxMutex);
+            _inboxQueued.erase(user);
+            _inboxInFlight.erase(user);
+            continue;
+        }
+        recoverForSession(session);
+    }
+}
+
+void ChatService::enqueueInbox(int userId)
+{
+    if (userId <= 0) return;
+    std::lock_guard<std::mutex> lock(_inboxMutex);
+    if (_inboxQueued.insert(userId).second)
+        _inboxOrder.push_back(userId);
 }
 
 // 查询单聊历史消息
@@ -1075,24 +1239,51 @@ void ChatService::messageAck(const TcpConnectionPtr &conn, json &js, Timestamp)
 
 void ChatService::scanReliableDeliveries()
 {
+    scanInboxRecovery();
     if (_durableScanInFlight.exchange(true)) return;
     auto* mainLoop = _mainLoop.load();
     if (!mainLoop) { _durableScanInFlight = false; return; }
     const auto node = _presence.nodeId();
     static std::uint64_t scanCount = 0; // called only on the main EventLoop
     const bool housekeeping = (++scanCount % 60 == 0);
-    if (!DBThreadPool::instance()->trySubmitDurable([this, mainLoop, node, housekeeping]() {
+    const bool discoverInbox = scanCount % 10 == 0;
+    if (!DBThreadPool::instance()->trySubmitDurable([this, mainLoop, node, housekeeping, discoverInbox]() {
             const auto now = gateway::unixMillis();
             if (housekeeping) {
                 auto expired = _durablePendingModel.expireOverdue(now);
                 if (!expired) ++_durableDbFailed;
+                else _durableExpired += *expired;
                 if (!_durablePendingModel.cleanupTerminal(
                         now - 7ULL * 24 * 60 * 60 * 1000))
                     ++_durableDbFailed;
+                auto counts = _durablePendingModel.activeCounts();
+                if (counts) {
+                    _dbPendingCount = counts->first;
+                    _dbWaitingCount = counts->second;
+                } else ++_durableDbFailed;
+            }
+            std::optional<std::vector<int>> waitingUsers;
+            if (discoverInbox) {
+                waitingUsers = _durablePendingModel.waitingUsersAfter(_waitingCursor);
+                if (waitingUsers && waitingUsers->empty() && _waitingCursor > 0) {
+                    _waitingCursor = 0;
+                    waitingUsers = _durablePendingModel.waitingUsersAfter(0);
+                }
+                if (waitingUsers && !waitingUsers->empty())
+                    _waitingCursor = waitingUsers->back();
             }
             auto due = _durablePendingModel.dueForNode(node, now);
-            mainLoop->queueInLoop([this, due = std::move(due)]() mutable {
+            mainLoop->queueInLoop([this, due = std::move(due), discoverInbox,
+                                   waitingUsers = std::move(waitingUsers)]() mutable {
                 _durableScanInFlight = false;
+                if (waitingUsers) {
+                    for (int user : *waitingUsers) {
+                        auto session = _sessionManager.sessionForUser(user);
+                        if (session && _presence.ownsUser(user, session->id())) {
+                            enqueueInbox(user);
+                        }
+                    }
+                } else if (discoverInbox) ++_durableDbFailed;
                 if (!due) { ++_durableDbFailed; return; }
                 for (auto& row : *due) handleDueDurableRecord(std::move(row));
             });
@@ -1114,13 +1305,13 @@ void ChatService::handleDueDurableRecord(gateway::DurablePendingRecord record)
         auto target = current ? current->connection() : nullptr;
         const auto now = gateway::unixMillis();
         const auto node = _presence.nodeId();
-        if (record.expireAtMs <= now || record.retryCount >= 2) {
+        if (record.expireAtMs <= now) {
             if (!DBThreadPool::instance()->trySubmitDurable(
                 [this, loop, id = record.deliveryId, now]() {
-                    const bool ok = _durablePendingModel.markExpired(id, now);
-                    loop->queueInLoop([this, id, ok]() {
-                        if (ok) _pendingDeliveries.cancel(id);
-                        else ++_durableDbFailed;
+                    const auto changed = _durablePendingModel.markExpired(id, now);
+                    loop->queueInLoop([this, id, changed]() {
+                        if (changed && *changed) { ++_durableExpired; _pendingDeliveries.cancel(id); }
+                        else if (!changed) ++_durableDbFailed;
                     });
                 })) ++_durableDbFailed;
             return;
@@ -1147,9 +1338,21 @@ void ChatService::handleDueDurableRecord(gateway::DurablePendingRecord record)
             if (!DBThreadPool::instance()->trySubmitDurable(
                 [this, id = record.deliveryId, node,
                  expected = record.nextRetryAtMs]() {
-                    if (!_durablePendingModel.markWaiting(
-                            id, node, expected, gateway::unixMillis()))
-                        ++_durableDbFailed;
+                    auto changed = _durablePendingModel.markWaiting(
+                        id, node, expected, gateway::unixMillis());
+                    if (!changed) ++_durableDbFailed;
+                    else if (*changed) ++_waitingRequeued;
+                })) ++_durableDbFailed;
+            return;
+        }
+        if (record.retryCount >= 2) {
+            if (!DBThreadPool::instance()->trySubmitDurable(
+                [this, loop, id = record.deliveryId, now]() {
+                    const auto changed = _durablePendingModel.markExpired(id, now);
+                    loop->queueInLoop([this, id, changed]() {
+                        if (changed && *changed) { ++_durableExpired; _pendingDeliveries.cancel(id); }
+                        else if (!changed) ++_durableDbFailed;
+                    });
                 })) ++_durableDbFailed;
             return;
         }
@@ -1159,8 +1362,9 @@ void ChatService::handleDueDurableRecord(gateway::DurablePendingRecord record)
             LOG_ERROR << "DURABLE_DELIVERY invalid payload id=" << record.deliveryId;
             if (!DBThreadPool::instance()->trySubmitDurable(
                 [this, id = record.deliveryId]() {
-                    if (!_durablePendingModel.markExpired(id, gateway::unixMillis()))
-                        ++_durableDbFailed;
+                    auto changed = _durablePendingModel.markExpired(id, gateway::unixMillis());
+                    if (!changed) ++_durableDbFailed;
+                    else if (*changed) ++_durableExpired;
                 })) ++_durableDbFailed;
             return;
         }
@@ -1245,5 +1449,14 @@ void ChatService::logDeliveryMetrics() const
              << " durable_persisted=" << _durablePersisted.load()
              << " durable_recovered=" << _durableRecovered.load()
              << " durable_acked=" << _durableAcked.load()
-             << " durable_db_failed=" << _durableDbFailed.load();
+             << " durable_db_failed=" << _durableDbFailed.load()
+             << " durable_waiting_created=" << _waitingCreated.load()
+             << " durable_waiting_claimed=" << _waitingClaimed.load()
+             << " durable_waiting_requeued=" << _waitingRequeued.load()
+             << " durable_offline_recovered=" << _offlineRecovered.load()
+             << " durable_expired=" << _durableExpired.load()
+             << " legacy_offline_migrated=" << _legacyMigrated.load()
+             << " legacy_offline_failed=" << _legacyFailed.load()
+             << " db_pending=" << _dbPendingCount.load()
+             << " db_waiting=" << _dbWaitingCount.load();
 }

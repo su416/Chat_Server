@@ -7,6 +7,9 @@
 #include <functional>
 #include <optional>
 #include <atomic>
+#include <mutex>
+#include <unordered_set>
+#include <deque>
 
 using namespace std;
 using namespace muduo;
@@ -94,9 +97,14 @@ private:
         const std::shared_ptr<const gateway::Session>& session,
         const gateway::DurablePendingRecord& record);
     void recoverForSession(const std::shared_ptr<const gateway::Session>& session);
+    void scanInboxRecovery();
+    void enqueueInbox(int userId);
+    void storeDurableOffline(int senderId, int receiverId, const json& payload,
+                             const TcpConnectionPtr& sender,
+                             std::function<void()> accepted);
     void recoverAtStartup();
     void handleDueDurableRecord(gateway::DurablePendingRecord record);
-    void storeOffline(int senderId, int receiverId, const json& payload);
+    void storeLegacyGroupOffline(int senderId, int receiverId, const json& payload);
 
     // 存储消息 id 和其对应的业务处理方法
     unordered_map<int, MsgHandler> _msgHandlerMap;
@@ -121,6 +129,15 @@ private:
     std::atomic<bool> _durableScanInFlight{false};
     std::atomic<std::uint64_t> _durablePersisted{0}, _durableRecovered{0},
         _durableAcked{0}, _durableDbFailed{0};
+    mutable std::mutex _inboxMutex;
+    std::unordered_set<int> _inboxQueued, _inboxInFlight;
+    std::deque<int> _inboxOrder;
+    std::atomic<std::uint64_t> _waitingCreated{0}, _waitingClaimed{0},
+        _waitingRequeued{0}, _offlineRecovered{0}, _legacyMigrated{0},
+        _legacyFailed{0};
+    std::atomic<std::uint64_t> _durableExpired{0};
+    std::atomic<int> _waitingCursor{0};
+    std::atomic<std::size_t> _dbPendingCount{0}, _dbWaitingCount{0};
 };
 
 #endif

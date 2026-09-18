@@ -23,7 +23,8 @@ public:
     // 查询某个群最近的群聊历史消息
     vector<string> queryRecentGroupChat(int groupid, int limit);
 
-    // 查询离线消息（status=2, 用于 login 推送）
+    // Phase 7: compatibility login field is group-only. Legacy one-chat rows
+    // are migrated into pending_delivery and sent with delivery_id + ACK.
     vector<string> queryOffline(int userid);
 
     // 标记离线消息为已送达

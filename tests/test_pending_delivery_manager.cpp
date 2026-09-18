@@ -132,9 +132,11 @@ TEST(PendingDeliveryTest, CapacityIsBounded)
     auto policy = fastPolicy();
     policy.maxPending = 1;
     PendingDeliveryManager manager(policy);
+    EXPECT_EQ(manager.availableSlots(), 1u);
     auto connection = fakeConnection(1);
     auto session = makeSession(1, 1001, connection);
     ASSERT_TRUE(manager.track(session, message(manager.nextDeliveryId())));
+    EXPECT_EQ(manager.availableSlots(), 0u);
     EXPECT_FALSE(manager.track(session, message(manager.nextDeliveryId())));
     EXPECT_EQ(manager.metrics().pendingPeak, 1u);
 }
@@ -151,8 +153,10 @@ TEST(PendingDeliveryTest, PayloadBytesAreBoundedAndReleasedAfterAck)
     ASSERT_TRUE(manager.track(session, message(first)));
     EXPECT_FALSE(manager.track(session, message(second)));
     EXPECT_GT(manager.metrics().pendingBytes, 0u);
+    EXPECT_LT(manager.availableBytes(), policy.maxPendingBytes);
     EXPECT_EQ(manager.ack(first, connection), gateway::AckResult::Acked);
     EXPECT_EQ(manager.metrics().pendingBytes, 0u);
+    EXPECT_EQ(manager.availableBytes(), policy.maxPendingBytes);
     EXPECT_TRUE(manager.track(session, message(second)));
 }
 

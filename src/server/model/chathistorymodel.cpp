@@ -2,6 +2,7 @@
 #include "db.h"
 #include "connectionpool.h"
 #include "json.hpp"
+#include "public.hpp"
 #include <cstdio>
 #include <cstring>
 
@@ -151,14 +152,15 @@ vector<string> ChatHistoryModel::queryRecentGroupChat(int groupid, int limit)
     return vec;
 }
 
-// 查询离线消息（status=2，登录时推送）
+// 旧群聊兼容字段；单聊不能从这里提前完成。
 vector<string> ChatHistoryModel::queryOffline(int userid)
 {
     char sql[512] = {0};
     snprintf(sql, sizeof(sql),
              "select msg from chatmessage "
-             "where toid = %d and status = 2 order by id",
-             userid);
+             "where toid = %d and status = 2 and JSON_VALID(msg) "
+             "and JSON_EXTRACT(msg,'$.msgid')=%d order by id",
+             userid, GROUP_CHAT_MSG);
 
     vector<string> vec;
     auto mysql = ConnectionPool::instance()->getConnection();
@@ -178,14 +180,11 @@ vector<string> ChatHistoryModel::queryOffline(int userid)
 // 标记离线消息为已送达
 void ChatHistoryModel::markDelivered(int userid)
 {
-    const string sql = "update chatmessage set status = 0 where toid = ? and status = 2";
-
-    MYSQL_BIND bind[1];
-    memset(bind, 0, sizeof(bind));
-
-    bind[0].buffer_type = MYSQL_TYPE_LONG;
-    bind[0].buffer = reinterpret_cast<char*>(&userid);
-
     auto mysql = ConnectionPool::instance()->getConnection();
-    mysql->executePrepared(sql, bind, 1);
+    char sql[512] = {0};
+    snprintf(sql, sizeof(sql), "update chatmessage set status=0 "
+             "where toid=%d and status=2 and JSON_VALID(msg) "
+             "and JSON_EXTRACT(msg,'$.msgid')=%d",
+             userid, GROUP_CHAT_MSG);
+    mysql->update(sql);
 }

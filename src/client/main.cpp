@@ -6,6 +6,10 @@
 #include <chrono>
 #include <ctime>
 #include <unordered_map>
+#include <unordered_set>
+#include <deque>
+#include <mutex>
+#include <cerrno>
 #include <functional>
 #include <cstring>
 using namespace std;
@@ -41,6 +45,7 @@ atomic_bool g_isLoginSuccess{false};
 
 // Protobuf 协议开关（--proto 参数启用）
 bool g_useProto = false;
+std::mutex g_sendMutex;
 
 // ──── Protobuf 协议辅助函数 ────
 
@@ -92,11 +97,22 @@ static void negotiateProto(int fd)
 // 通用发送：根据 g_useProto 选择格式，返回 send() 的返回值
 static ssize_t sendMsgWrap(int fd, const json& js)
 {
+    std::lock_guard<std::mutex> lock(g_sendMutex);
+    auto sendAll = [fd](const char* data, size_t size) -> ssize_t {
+        size_t sent = 0;
+        while (sent < size) {
+            const auto result = send(fd, data + sent, size - sent, 0);
+            if (result < 0 && errno == EINTR) continue;
+            if (result <= 0) return -1;
+            sent += static_cast<size_t>(result);
+        }
+        return static_cast<ssize_t>(sent);
+    };
     if (!g_useProto)
     {
         string body = js.dump();
         string frame = body + '\0';
-        return send(fd, frame.c_str(), frame.size(), 0);
+        return sendAll(frame.c_str(), frame.size());
     }
     else
     {
@@ -105,8 +121,8 @@ static ssize_t sendMsgWrap(int fd, const json& js)
         env.set_payload(js.dump());
         string data = env.SerializeAsString();
         uint32_t netLen = htonl(static_cast<uint32_t>(data.size()));
-        if (send(fd, &netLen, 4, 0) != 4) return -1;
-        return send(fd, data.c_str(), data.size(), 0);
+        if (sendAll(reinterpret_cast<const char*>(&netLen), 4) != 4) return -1;
+        return sendAll(data.c_str(), data.size());
     }
 }
 
@@ -366,6 +382,8 @@ void doLoginResponse(json &responsejs)
 // 子线程 - 接收线程
 void readTaskHandler(int clientfd)
 {
+    std::unordered_set<string> recentDeliveries;
+    std::deque<string> deliveryOrder;
     for (;;)
     {
         string payload;
@@ -395,6 +413,21 @@ void readTaskHandler(int clientfd)
         int msgtype = js["msgid"].get<int>();
         if (ONE_CHAT_MSG == msgtype)
         {
+            if (js.contains("delivery_id")) {
+                const string key = js["delivery_id"].is_string()
+                    ? js["delivery_id"].get<string>() : js["delivery_id"].dump();
+                const bool first = recentDeliveries.insert(key).second;
+                if (first) {
+                    deliveryOrder.push_back(key);
+                    if (deliveryOrder.size() > 4096) {
+                        recentDeliveries.erase(deliveryOrder.front());
+                        deliveryOrder.pop_front();
+                    }
+                }
+                sendMsgWrap(clientfd, json{{"msgid", MESSAGE_ACK},
+                                           {"delivery_id", js["delivery_id"]}});
+                if (!first) continue;
+            }
             cout << js["time"].get<string>() << " [" << js["id"] << "]" << js["name"].get<string>()
                  << " said: " << js["msg"].get<string>() << endl;
             continue;
@@ -772,4 +805,3 @@ string getCurrentTime()
             (int)ptm->tm_hour, (int)ptm->tm_min, (int)ptm->tm_sec);
     return std::string(date);
 }
-

@@ -1,5 +1,6 @@
 #include "model/durablependingmodel.hpp"
 #include "connectionpool.h"
+#include "json.hpp"
 
 #include <muduo/base/Logging.h>
 #include <mysql/mysql.h>
@@ -139,6 +140,114 @@ PersistResult DurablePendingModel::persist(
     return {PersistStatus::Existing, std::move(existing->front())};
 }
 
+PersistResult DurablePendingModel::persistOffline(
+    int receiverUserId, int messageType, const std::string& payload,
+    std::uint64_t nowMs, const std::string& routeId) {
+    if (receiverUserId <= 0 || messageType <= 0 || payload.empty() ||
+        payload.size() > 1024 * 1024 || routeId.size() > 192 ||
+        nowMs > std::numeric_limits<std::uint64_t>::max() - kRetentionMs)
+        return {};
+    auto connection = borrow();
+    if (!connection) return {};
+    auto* conn = connection->getConnection();
+    const auto sql = "INSERT INTO pending_delivery"
+        "(route_id,owner_node,receiver_user_id,message_type,payload,retry_count,"
+        "next_retry_at_ms,expire_at_ms,state,created_at_ms,updated_at_ms) VALUES"
+        "(" + (routeId.empty() ? std::string("NULL") : quoted(conn, routeId)) +
+        ",NULL," + std::to_string(receiverUserId) + "," +
+        std::to_string(messageType) + "," + quoted(conn, payload) + ",0," +
+        std::to_string(nowMs) + "," + std::to_string(nowMs + kRetentionMs) +
+        ",1," + std::to_string(nowMs) + "," + std::to_string(nowMs) + ")";
+    if (mysql_query(conn, sql.c_str()) != 0) {
+        if (routeId.empty() || mysql_errno(conn) != 1062) {
+            LOG_ERROR << "DURABLE_OFFLINE_DB insert failed code=" << mysql_errno(conn);
+            return {};
+        }
+        auto existing = queryRows(conn, "SELECT " + std::string(columns) +
+            " FROM pending_delivery WHERE route_id=" + quoted(conn, routeId) +
+            " LIMIT 1");
+        if (!existing || existing->size() != 1 ||
+            existing->front().receiverUserId != receiverUserId ||
+            existing->front().messageType != messageType ||
+            existing->front().payload != payload) return {};
+        return {PersistStatus::Existing, std::move(existing->front())};
+    }
+    DurablePendingRecord row;
+    row.deliveryId = mysql_insert_id(conn);
+    row.routeId = routeId;
+    row.receiverUserId = receiverUserId;
+    row.messageType = messageType;
+    row.payload = payload;
+    row.nextRetryAtMs = nowMs;
+    row.expireAtMs = nowMs + kRetentionMs;
+    row.state = DurableState::WaitingSession;
+    return {PersistStatus::Inserted, std::move(row)};
+}
+
+std::optional<std::size_t> DurablePendingModel::migrateLegacyForUser(
+    int user, std::uint64_t nowMs, std::size_t limit) {
+    if (user <= 0 || limit == 0) return std::size_t{0};
+    auto connection = borrow();
+    if (!connection) return std::nullopt;
+    auto* conn = connection->getConnection();
+    const auto select = "SELECT id,msg FROM chatmessage WHERE toid=" +
+        std::to_string(user) + " AND groupid IS NULL AND status=2 "
+        "AND JSON_VALID(msg) AND JSON_EXTRACT(msg,'$.msgid')=6 ORDER BY id LIMIT " +
+        std::to_string(std::min(limit, size_t{100}));
+    if (!execute(conn, select)) return std::nullopt;
+    std::unique_ptr<MYSQL_RES, decltype(&mysql_free_result)> result(
+        mysql_store_result(conn), &mysql_free_result);
+    if (!result) return std::nullopt;
+    std::vector<std::pair<std::uint64_t, std::string>> legacy;
+    while (auto row = mysql_fetch_row(result.get())) {
+        auto* lengths = mysql_fetch_lengths(result.get());
+        try { legacy.emplace_back(std::stoull(field(row, lengths, 0)),
+                                  field(row, lengths, 1)); }
+        catch (...) { return std::nullopt; }
+    }
+    std::size_t migrated = 0;
+    for (const auto& [id, payload] : legacy) {
+        try {
+            const auto parsed = nlohmann::json::parse(payload);
+            if (!parsed.is_object() || parsed.value("msgid", 0) != 6 ||
+                parsed.value("toid", 0) != user ||
+                !parsed.contains("msg") || !parsed["msg"].is_string()) {
+                LOG_ERROR << "LEGACY_OFFLINE_INVALID row=" << id;
+                continue;
+            }
+        } catch (...) {
+            LOG_ERROR << "LEGACY_OFFLINE_INVALID row=" << id;
+            continue;
+        }
+        if (!execute(conn, "START TRANSACTION")) return std::nullopt;
+        const auto insert = "INSERT INTO pending_delivery"
+            "(route_id,owner_node,legacy_chatmessage_id,receiver_user_id,"
+            "message_type,payload,retry_count,next_retry_at_ms,expire_at_ms,"
+            "state,created_at_ms,updated_at_ms) VALUES(NULL,NULL," +
+            std::to_string(id) + "," + std::to_string(user) + ",6," +
+            quoted(conn, payload) + ",0," + std::to_string(nowMs) + "," +
+            std::to_string(nowMs + kRetentionMs) + ",1," +
+            std::to_string(nowMs) + "," + std::to_string(nowMs) + ")";
+        bool ok = mysql_query(conn, insert.c_str()) == 0;
+        if (!ok && mysql_errno(conn) == 1062) {
+            auto existing = queryRows(conn, "SELECT " + std::string(columns) +
+                " FROM pending_delivery WHERE legacy_chatmessage_id=" +
+                std::to_string(id) + " LIMIT 1");
+            ok = existing && existing->size() == 1 &&
+                existing->front().receiverUserId == user &&
+                existing->front().payload == payload;
+        }
+        if (ok) ok = execute(conn, "UPDATE chatmessage SET status=0 WHERE id=" +
+            std::to_string(id) + " AND toid=" + std::to_string(user) +
+            " AND status=2");
+        if (ok) ok = execute(conn, "COMMIT");
+        else execute(conn, "ROLLBACK");
+        if (!ok) return std::nullopt;
+        ++migrated;
+    }
+    return migrated;
+}
+
 DurableAckStatus DurablePendingModel::markAcked(
     std::uint64_t id, int user, std::uint64_t nowMs) {
     auto connection = borrow();
@@ -158,24 +267,25 @@ DurableAckStatus DurablePendingModel::markAcked(
         return DurableAckStatus::AlreadyCompleted;
     return DurableAckStatus::Error;
 }
-bool DurablePendingModel::markWaiting(
+std::optional<bool> DurablePendingModel::markWaiting(
     std::uint64_t id, const std::string& node,
     std::uint64_t expectedNext, std::uint64_t nowMs) {
     auto connection = borrow();
-    if (!connection || id == 0 || node.empty()) return false;
+    if (!connection || id == 0 || node.empty()) return std::nullopt;
     auto* conn = connection->getConnection();
-    return execute(conn,
-        "UPDATE pending_delivery SET state=1,updated_at_ms=" + std::to_string(nowMs) +
+    if (!execute(conn,
+        "UPDATE pending_delivery SET state=1,owner_node=NULL,updated_at_ms=" + std::to_string(nowMs) +
         " WHERE delivery_id=" + std::to_string(id) + " AND owner_node=" +
         quoted(conn, node) + " AND state=0 AND next_retry_at_ms=" +
-        std::to_string(expectedNext));
+        std::to_string(expectedNext))) return std::nullopt;
+    return mysql_affected_rows(conn) == 1;
 }
 bool DurablePendingModel::markWaitingForUser(
     int user, const std::string& node, std::uint64_t nowMs) {
     auto connection = borrow();
     if (!connection || user <= 0 || node.empty() || node.size() > 64) return false;
     auto* conn = connection->getConnection();
-    return execute(conn, "UPDATE pending_delivery SET state=1,updated_at_ms=" +
+    return execute(conn, "UPDATE pending_delivery SET state=1,owner_node=NULL,updated_at_ms=" +
         std::to_string(nowMs) + " WHERE receiver_user_id=" + std::to_string(user) +
         " AND owner_node=" + quoted(conn, node) + " AND state=0");
 }
@@ -193,12 +303,15 @@ bool DurablePendingModel::transferOwner(
         quoted(conn, expectedOwner) + " AND state IN(0,1) AND expire_at_ms>" +
         std::to_string(nowMs));
 }
-bool DurablePendingModel::markExpired(std::uint64_t id, std::uint64_t nowMs) {
+std::optional<bool> DurablePendingModel::markExpired(std::uint64_t id, std::uint64_t nowMs) {
     auto connection = borrow();
-    if (!connection || id == 0) return false;
-    return execute(connection->getConnection(),
+    if (!connection || id == 0) return std::nullopt;
+    auto* conn = connection->getConnection();
+    if (!execute(conn,
         "UPDATE pending_delivery SET state=3,updated_at_ms=" + std::to_string(nowMs) +
-        " WHERE delivery_id=" + std::to_string(id) + " AND state IN(0,1)");
+        " WHERE delivery_id=" + std::to_string(id) + " AND state IN(0,1)"))
+        return std::nullopt;
+    return mysql_affected_rows(conn) == 1;
 }
 bool DurablePendingModel::markRetry(std::uint64_t id, const std::string& node,
                                     std::uint32_t expectedCount,
@@ -218,33 +331,85 @@ bool DurablePendingModel::markRetry(std::uint64_t id, const std::string& node,
 }
 
 std::optional<std::vector<DurablePendingRecord>> DurablePendingModel::claimForUser(
-    int user, const std::string& node, std::uint64_t nowMs, std::size_t limit) {
+    int user, const std::string& node, std::uint64_t nowMs,
+    std::size_t limit, std::size_t maxBytes) {
     auto connection = borrow();
     if (!connection || user <= 0 || node.empty() || node.size() > 64) return std::nullopt;
     auto* conn = connection->getConnection();
     auto rows = queryRows(conn, "SELECT " + std::string(columns) +
         " FROM pending_delivery WHERE receiver_user_id=" + std::to_string(user) +
         " AND state IN(0,1) AND expire_at_ms>" + std::to_string(nowMs) +
-        " ORDER BY delivery_id LIMIT " + std::to_string(std::min(limit, size_t{10000})));
+        " AND (state=1 OR (state=0 AND owner_node<>" + quoted(conn, node) + "))" +
+        " ORDER BY delivery_id LIMIT " + std::to_string(std::min(limit, size_t{32})));
     if (!rows) return std::nullopt;
     std::vector<DurablePendingRecord> claimed;
+    std::size_t claimedBytes = 0;
     for (auto& row : *rows) {
-        // Recovery is scheduled by the regular durable retry scanner. Its
-        // persisted CAS advances retry_count before any replayed send.
-        const auto next = nowMs;
+        if (row.payload.size() > maxBytes - claimedBytes) break;
+        // Claim is durable before the ordered initial send. The scanner may
+        // retry only after the regular ACK timeout.
+        const auto next = nowMs + kAckTimeoutMs;
         if (!execute(conn, "UPDATE pending_delivery SET owner_node=" + quoted(conn, node) +
-            ",state=0,next_retry_at_ms=" + std::to_string(next) +
+            ",state=0,retry_count=" +
+            std::to_string(row.state == DurableState::WaitingSession ? 0 : row.retryCount) +
+            ",next_retry_at_ms=" + std::to_string(next) +
             ",updated_at_ms=" + std::to_string(nowMs) +
             " WHERE delivery_id=" + std::to_string(row.deliveryId) +
-            " AND state IN(0,1) AND expire_at_ms>" + std::to_string(nowMs)))
+            " AND expire_at_ms>" + std::to_string(nowMs) +
+            " AND state=" + std::to_string(static_cast<int>(row.state)) +
+            " AND owner_node <=> " + (row.ownerNode.empty() ? std::string("NULL") : quoted(conn, row.ownerNode)) +
+            " AND next_retry_at_ms=" + std::to_string(row.nextRetryAtMs)))
             return std::nullopt;
         if (mysql_affected_rows(conn) != 1) continue;
+        if (row.state == DurableState::WaitingSession) row.retryCount = 0;
         row.ownerNode = node;
         row.state = DurableState::Pending;
         row.nextRetryAtMs = next;
+        claimedBytes += row.payload.size();
         claimed.push_back(std::move(row));
     }
     return claimed;
+}
+
+std::optional<std::pair<std::size_t, std::size_t>> DurablePendingModel::activeCounts() {
+    auto connection = borrow();
+    if (!connection) return std::nullopt;
+    auto* conn = connection->getConnection();
+    if (!execute(conn, "SELECT state,COUNT(*) FROM pending_delivery "
+                       "WHERE state IN(0,1) GROUP BY state")) return std::nullopt;
+    std::unique_ptr<MYSQL_RES, decltype(&mysql_free_result)> result(
+        mysql_store_result(conn), &mysql_free_result);
+    if (!result) return std::nullopt;
+    std::pair<std::size_t, std::size_t> counts{0, 0};
+    while (auto row = mysql_fetch_row(result.get())) {
+        try {
+            const auto state = std::stoi(row[0]);
+            const auto value = std::stoull(row[1]);
+            if (state == 0) counts.first = value;
+            if (state == 1) counts.second = value;
+        } catch (...) { return std::nullopt; }
+    }
+    return counts;
+}
+
+std::optional<std::vector<int>> DurablePendingModel::waitingUsersAfter(
+    int userId, std::size_t limit) {
+    auto connection = borrow();
+    if (!connection || userId < 0) return std::nullopt;
+    auto* conn = connection->getConnection();
+    if (!execute(conn, "SELECT DISTINCT receiver_user_id FROM pending_delivery "
+        "WHERE state=1 AND receiver_user_id>" + std::to_string(userId) +
+        " ORDER BY receiver_user_id LIMIT " +
+        std::to_string(std::min(limit, size_t{100})))) return std::nullopt;
+    std::unique_ptr<MYSQL_RES, decltype(&mysql_free_result)> result(
+        mysql_store_result(conn), &mysql_free_result);
+    if (!result) return std::nullopt;
+    std::vector<int> users;
+    while (auto row = mysql_fetch_row(result.get())) {
+        try { users.push_back(std::stoi(row[0])); }
+        catch (...) { return std::nullopt; }
+    }
+    return users;
 }
 
 std::optional<std::vector<DurablePendingRecord>> DurablePendingModel::dueForNode(

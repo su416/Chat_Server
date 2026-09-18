@@ -81,7 +81,12 @@ def stopped_node_recovery(folder, process_b):
 
 
 def pending_crash_recovery(folder, process_b):
-    """Inject a valid route with absent owner so B reads it but cannot XACK."""
+    """Reject target DB acceptance so the Stream route remains in PEL."""
+    process_b.kill()
+    process_b.wait(timeout=5)
+    process_b, rejected_log = p.start_server(
+        folder, "B", 6001,
+        extra_env={"CHAT_PHASE7_TEST_REJECT_OFFLINE_PERSIST": "1"})
     sender = p.register_user(p.RUN_ID, "pel-s")
     receiver = p.register_user(p.RUN_ID, "pel-r")
     route_id = f"{p.RUN_ID}-pel-crash"
@@ -102,7 +107,8 @@ def pending_crash_recovery(folder, process_b):
         raise AssertionError("B did not read route into PEL")
     process_b.kill()
     process_b.wait(timeout=5)
-    print("PASS kill -9 B after XREADGROUP before XACK: route remained in PEL",
+    rejected_log.close()
+    print("PASS kill -9 B after rejected durable acceptance: route remained in PEL",
           flush=True)
     process_b, new_log = p.start_server(folder, "B", 6001)
     receiver_sock, receiver_wire = p.client(receiver, 6001, "json")

@@ -146,6 +146,18 @@ RestoreResult PendingDeliveryManager::restore(
     return RestoreResult::Inserted;
 }
 
+std::size_t PendingDeliveryManager::availableSlots() const
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    return _policy.maxPending - _pending.size();
+}
+
+std::size_t PendingDeliveryManager::availableBytes() const
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    return _policy.maxPendingBytes - _pendingBytes;
+}
+
 bool PendingDeliveryManager::markDurableRetry(
     std::uint64_t deliveryId, std::uint32_t retryCount, Clock::time_point now)
 {

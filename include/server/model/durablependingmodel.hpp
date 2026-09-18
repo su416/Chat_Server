@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace gateway {
@@ -36,22 +37,33 @@ public:
     PersistResult persist(const std::string& routeId, const std::string& nodeId,
                           int receiverUserId, int messageType,
                           const std::string& payload, std::uint64_t nowMs);
+    PersistResult persistOffline(int receiverUserId, int messageType,
+                                 const std::string& payload, std::uint64_t nowMs,
+                                 const std::string& routeId = "");
+    // Idempotent legacy drain keyed by chatmessage.id; never trusts JSON equality.
+    std::optional<std::size_t> migrateLegacyForUser(int receiverUserId,
+                                                    std::uint64_t nowMs,
+                                                    std::size_t limit = 100);
     DurableAckStatus markAcked(std::uint64_t deliveryId, int receiverUserId,
                                std::uint64_t nowMs);
-    bool markWaiting(std::uint64_t deliveryId, const std::string& nodeId,
-                     std::uint64_t expectedNextRetryAtMs, std::uint64_t nowMs);
+    std::optional<bool> markWaiting(std::uint64_t deliveryId, const std::string& nodeId,
+                                    std::uint64_t expectedNextRetryAtMs, std::uint64_t nowMs);
     bool markWaitingForUser(int receiverUserId, const std::string& nodeId,
                             std::uint64_t nowMs);
     bool transferOwner(std::uint64_t deliveryId,
                        const std::string& expectedOwner,
                        const std::string& newOwner, std::uint64_t nowMs);
-    bool markExpired(std::uint64_t deliveryId, std::uint64_t nowMs);
+    std::optional<bool> markExpired(std::uint64_t deliveryId, std::uint64_t nowMs);
     bool markRetry(std::uint64_t deliveryId, const std::string& nodeId,
                    std::uint32_t expectedCount,
                    std::uint64_t nextRetryAtMs, std::uint64_t nowMs);
     std::optional<std::vector<DurablePendingRecord>> claimForUser(
         int receiverUserId, const std::string& nodeId,
-        std::uint64_t nowMs, std::size_t limit = 10000);
+        std::uint64_t nowMs, std::size_t limit = 32,
+        std::size_t maxBytes = 16 * 1024 * 1024);
+    std::optional<std::pair<std::size_t, std::size_t>> activeCounts();
+    std::optional<std::vector<int>> waitingUsersAfter(int userId,
+                                                      std::size_t limit = 100);
     std::optional<std::vector<DurablePendingRecord>> dueForNode(
         const std::string& nodeId, std::uint64_t nowMs, std::size_t limit = 100);
     // Returns count of active records assigned to this node, nullopt on DB error.
