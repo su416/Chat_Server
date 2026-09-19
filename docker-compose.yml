@@ -1,57 +1,68 @@
 services:
   mysql:
-    image: registry.cn-hangzhou.aliyuncs.com/docker-hub/mysql:8.0
-    container_name: chatserver-mysql
-    restart: unless-stopped
+    image: mysql:8.0
     environment:
-      MYSQL_ROOT_PASSWORD: "123456"
+      MYSQL_ROOT_PASSWORD: ${CHAT_MYSQL_ROOT_PASSWORD:-root_password}
       MYSQL_DATABASE: chat
+      MYSQL_USER: chat
+      MYSQL_PASSWORD: ${CHAT_MYSQL_PASSWORD:-chat_password}
     ports:
       - "3307:3306"
     volumes:
       - mysql_data:/var/lib/mysql
-      - ./sql:/docker-entrypoint-initdb.d
+      - ./sql:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p123456"]
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$${MYSQL_ROOT_PASSWORD} --silent"]
       interval: 5s
       timeout: 3s
-      retries: 10
-    networks:
-      - chatnet
+      retries: 30
+      start_period: 20s
 
   redis:
     image: redis:7-alpine
-    container_name: chatserver-redis
-    restart: unless-stopped
     ports:
       - "6380:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 3s
-      retries: 5
-    networks:
-      - chatnet
+      interval: 3s
+      timeout: 2s
+      retries: 20
 
-  chatserver:
+  chatserver-a:
     build: .
-    container_name: chatserver-app
-    restart: unless-stopped
+    environment: &chatserver-environment
+      CHAT_SERVER_IP: 0.0.0.0
+      CHAT_SERVER_PORT: 6000
+      CHAT_MYSQL_HOST: mysql
+      CHAT_MYSQL_PORT: 3306
+      CHAT_MYSQL_USER: chat
+      CHAT_MYSQL_PASSWORD: ${CHAT_MYSQL_PASSWORD:-chat_password}
+      CHAT_MYSQL_DATABASE: chat
+      CHAT_REDIS_HOST: redis
+      CHAT_REDIS_PORT: 6379
+      CHAT_NODE_ID: chat-server-a
+      CHAT_SERVER_NAME: ChatServer-A
     ports:
       - "6000:6000"
-    volumes:
-      - ./conf/chatserver.docker.json:/app/conf/chatserver.json:ro
     depends_on:
       mysql:
         condition: service_healthy
       redis:
         condition: service_healthy
-    networks:
-      - chatnet
+
+  chatserver-b:
+    build: .
+    environment:
+      <<: *chatserver-environment
+      CHAT_NODE_ID: chat-server-b
+      CHAT_SERVER_NAME: ChatServer-B
+    ports:
+      - "6001:6000"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
 
 volumes:
   mysql_data:
-
-networks:
-  chatnet:
-    driver: bridge

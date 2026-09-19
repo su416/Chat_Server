@@ -2,6 +2,7 @@
 #include "json.hpp"
 #include <fstream>
 #include <iostream>
+#include <cstdlib>
 
 using json = nlohmann::json;
 
@@ -69,6 +70,26 @@ bool Config::load(const string& filename)
         _configMap["flow.output_high_watermark_bytes"] = to_string(flow.value("output_high_watermark_bytes", 4 * 1024 * 1024));
         _configMap["flow.output_hard_limit_bytes"] = to_string(flow.value("output_hard_limit_bytes", 8 * 1024 * 1024));
         _configMap["flow.stream_soft_limit"] = to_string(flow.value("stream_soft_limit", 8000));
+        _configMap["flow.ack_timeout_ms"] = to_string(flow.value("ack_timeout_ms", 2000));
+        _configMap["flow.max_retries"] = to_string(flow.value("max_retries", 2));
+        _configMap["flow.pending_max_entries"] = to_string(flow.value("pending_max_entries", 10000));
+        _configMap["flow.pending_max_bytes"] = to_string(flow.value("pending_max_bytes", 16 * 1024 * 1024));
+        _configMap["flow.deferred_ack_max_entries"] = to_string(flow.value("deferred_ack_max_entries", 10000));
+
+        const auto overrideFromEnv = [this](const char* variable, const char* key) {
+            if (const char* value = std::getenv(variable)) _configMap[key] = value;
+        };
+        overrideFromEnv("CHAT_SERVER_IP", "server.ip");
+        overrideFromEnv("CHAT_SERVER_PORT", "server.port");
+        overrideFromEnv("CHAT_SERVER_NAME", "server.name");
+        overrideFromEnv("CHAT_NODE_ID", "server.node_id");
+        overrideFromEnv("CHAT_MYSQL_HOST", "mysql.host");
+        overrideFromEnv("CHAT_MYSQL_PORT", "mysql.port");
+        overrideFromEnv("CHAT_MYSQL_USER", "mysql.user");
+        overrideFromEnv("CHAT_MYSQL_PASSWORD", "mysql.password");
+        overrideFromEnv("CHAT_MYSQL_DATABASE", "mysql.dbname");
+        overrideFromEnv("CHAT_REDIS_HOST", "redis.host");
+        overrideFromEnv("CHAT_REDIS_PORT", "redis.port");
         if (getDbWorkerThreads() < 1 || getDbWorkerThreads() > 64 ||
             getDbMaxQueueSize() < 4 || getDbMaxQueueSize() > 65536 ||
             getOfflineClaimBatch() < 1 || getOfflineClaimBatch() > 128 ||
@@ -76,7 +97,12 @@ bool Config::load(const string& filename)
             getOutputHighWatermarkBytes() < 1024 ||
             getOutputHardLimitBytes() < 2LL * getOutputHighWatermarkBytes() ||
             getOutputHardLimitBytes() > 64 * 1024 * 1024 ||
-            getStreamSoftLimit() < 1 || getStreamSoftLimit() > 10000)
+            getStreamSoftLimit() < 1 || getStreamSoftLimit() > 10000 ||
+            getAckTimeoutMs() < 100 || getAckTimeoutMs() > 60000 ||
+            getMaxRetries() < 0 || getMaxRetries() > 20 ||
+            getPendingMaxEntries() < 1 || getPendingMaxEntries() > 100000 ||
+            getPendingMaxBytes() < 1024 || getPendingMaxBytes() > 256 * 1024 * 1024 ||
+            getDeferredAckMaxEntries() < 1 || getDeferredAckMaxEntries() > 100000)
             throw std::invalid_argument("invalid flow control configuration");
     }
     catch (const exception& e)
@@ -201,3 +227,8 @@ int Config::getOfflineUsersPerRound() const { return stoi(_configMap.at("flow.of
 int Config::getOutputHighWatermarkBytes() const { return stoi(_configMap.at("flow.output_high_watermark_bytes")); }
 int Config::getOutputHardLimitBytes() const { return stoi(_configMap.at("flow.output_hard_limit_bytes")); }
 int Config::getStreamSoftLimit() const { return stoi(_configMap.at("flow.stream_soft_limit")); }
+int Config::getAckTimeoutMs() const { return stoi(_configMap.at("flow.ack_timeout_ms")); }
+int Config::getMaxRetries() const { return stoi(_configMap.at("flow.max_retries")); }
+int Config::getPendingMaxEntries() const { return stoi(_configMap.at("flow.pending_max_entries")); }
+int Config::getPendingMaxBytes() const { return stoi(_configMap.at("flow.pending_max_bytes")); }
+int Config::getDeferredAckMaxEntries() const { return stoi(_configMap.at("flow.deferred_ack_max_entries")); }

@@ -1,5 +1,3 @@
-use chat;
-
 create table if not exists chatmessage (
     id bigint primary key auto_increment,
     fromid int not null,
@@ -11,5 +9,6 @@ create table if not exists chatmessage (
     extra varchar(256) default null comment '扩展信息JSON: {"name":"alice"}',
 
     index idx_peer_history (fromid, toid, id),
-    index idx_group_history (groupid, id)
+    index idx_group_history (groupid, id),
+    index idx_chat_legacy_inbox (toid, status, id)
 );

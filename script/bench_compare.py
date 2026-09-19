@@ -9,23 +9,26 @@ import os
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUTPUT_DIR = os.path.join(PROJECT_ROOT, "docs", "bench_results")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-DB_USER = "root"
-DB_PASS = "123456"
+DB_CONFIG = json.loads((Path(PROJECT_ROOT) / "conf/chatserver.json").read_text())["mysql"]
 
 def run_mysql(sql):
+    env = {**os.environ, "MYSQL_PWD": DB_CONFIG["password"]}
     return subprocess.run(
-        ["sudo", "mysql", f"-u{DB_USER}", f"-p{DB_PASS}", "-e", sql],
-        capture_output=True, text=True
+        ["mysql", "--host", DB_CONFIG["host"], "--port", str(DB_CONFIG["port"]),
+         "--user", DB_CONFIG["user"], "--database", DB_CONFIG["dbname"],
+         "--execute", sql],
+        env=env, capture_output=True, text=True
     )
 
 def clear_bench_data():
-    run_mysql("DELETE FROM chat.user WHERE name LIKE 'bench%';")
-    run_mysql("DELETE FROM chat.chatmessage WHERE msg LIKE '%bench%';")
+    run_mysql("DELETE FROM user WHERE name LIKE 'bench%';")
+    run_mysql("DELETE FROM chatmessage WHERE msg LIKE '%bench%';")
 
 def run_bench(script_name, label):
     print(f"\n{'='*60}")

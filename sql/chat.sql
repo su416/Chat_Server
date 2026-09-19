@@ -1,6 +1,3 @@
-create database if not exists chat charset=utf8mb4;
-use chat;
-
 -- 用户表
 create table if not exists user (
     id int primary key auto_increment,

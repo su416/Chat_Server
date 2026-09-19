@@ -1,0 +1,14 @@
+.git
+.env
+build
+bin
+run
+qt_client/build
+docs/evolution
+docs/adr
+docs/resume_points.md
+docs/interview_story.md
+**/__pycache__
+*.pyc
+*.log
+core*

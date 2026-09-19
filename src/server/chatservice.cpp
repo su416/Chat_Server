@@ -25,10 +25,14 @@ namespace
 gateway::DeliveryPolicy deliveryPolicy()
 {
     gateway::DeliveryPolicy policy;
+    policy.ackTimeout = std::chrono::milliseconds(Config::instance().getAckTimeoutMs());
+    policy.maxRetries = static_cast<std::uint32_t>(Config::instance().getMaxRetries());
+    policy.maxPending = static_cast<std::size_t>(Config::instance().getPendingMaxEntries());
+    policy.maxPendingBytes = static_cast<std::size_t>(Config::instance().getPendingMaxBytes());
     if (const char* value = std::getenv("CHAT_PHASE7_TEST_MAX_PENDING")) {
         try {
             const auto max = std::stoul(value);
-            if (max > 0 && max <= 10000) policy.maxPending = max;
+            if (max > 0 && max <= 100000) policy.maxPending = max;
         } catch (...) { /* keep production default */ }
     }
     return policy;
@@ -1252,7 +1256,9 @@ void ChatService::messageAck(const TcpConnectionPtr &conn, json &js, Timestamp)
         if (!session) return;
         {
             std::lock_guard<std::mutex> lock(_ackMutex);
-            if (_deferredAcks.size() >= 10000 && !_deferredAcks.count(*deliveryId)) {
+            if (_deferredAcks.size() >= static_cast<std::size_t>(
+                    Config::instance().getDeferredAckMaxEntries()) &&
+                !_deferredAcks.count(*deliveryId)) {
                 ++_durableDbFailed;
                 LOG_ERROR << "DURABLE_ACK deferred capacity exhausted id=" << *deliveryId;
                 return;
@@ -1435,7 +1441,8 @@ void ChatService::handleDueDurableRecord(gateway::DurablePendingRecord record)
             return;
         }
         if (ChatServer::isBackpressured(target)) return;
-        if (record.retryCount >= 2) {
+        if (record.retryCount >= static_cast<std::uint32_t>(
+                Config::instance().getMaxRetries())) {
             if (!DBThreadPool::instance()->trySubmitDurable(
                 [this, loop, id = record.deliveryId, now]() {
                     const auto changed = _durablePendingModel.markExpired(id, now);
@@ -1470,7 +1477,8 @@ void ChatService::handleDueDurableRecord(gateway::DurablePendingRecord record)
                 const auto now = gateway::unixMillis();
                 const bool persisted = _durablePendingModel.markRetry(
                     record.deliveryId, _presence.nodeId(), record.retryCount,
-                    now + 2000, now);
+                    now + static_cast<std::uint64_t>(
+                        Config::instance().getAckTimeoutMs()), now);
                 loop->queueInLoop([this, weakCurrent, delivery, record, persisted]() {
                     if (!persisted) {
                         ++_durableDbFailed;

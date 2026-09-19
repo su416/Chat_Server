@@ -1,162 +1,234 @@
-# ChatServer — 组织内部即时通讯平台
+# Chat_Server — C++ 分布式实时消息网关
 
-[![C++17](https://img.shields.io/badge/C%2B%2B-17-blue)](https://en.cppreference.com/w/cpp/17)
-[![CMake](https://img.shields.io/badge/CMake-3.10%2B-green)](https://cmake.org/)
-[![Qt6](https://img.shields.io/badge/Qt-6.11-green)](https://www.qt.io/)
-[![MySQL](https://img.shields.io/badge/MySQL-8.0-orange)](https://www.mysql.com/)
-[![Redis](https://img.shields.io/badge/Redis-7-red)](https://redis.io/)
-[![Ubuntu](https://img.shields.io/badge/Ubuntu-24.04-purple)](https://ubuntu.com/)
+这是一个基于 C++17 和 Muduo 的多节点实时消息服务。项目从单机聊天室逐步演进为具备 Session 所有权、JSON/Protobuf 双协议、Redis Presence、Redis Streams 跨节点路由、客户端 ACK/重试、MySQL durable pending、离线收件箱与有界背压的完整工程。
 
-基于 C++17 + Muduo + MySQL + Redis 的组织内部即时通讯平台，配套 Qt6 图形客户端与自动化压测工具链。
+系统提供 **bounded at-least-once delivery**，不声称 Exactly Once，也不把应用 ACK 等同于已读回执。
 
-## 系统架构
+## Key Features
 
-```
-Qt6 图形客户端 / 命令行客户端
+- Muduo Reactor 网络模型，连接 context 只在所属 I/O loop 使用
+- JSON 与 Protobuf framing、粘包/半包处理和连接级协议状态
+- `SessionManager` 管理本节点用户与连接生命周期
+- Redis Presence：`user -> owner node`，带租约和 compare-and-delete
+- Redis Streams：Consumer Group、PEL、XAUTOCLAIM、routeId 去重
+- 两层身份：跨节点 `routeId`，目标节点到客户端 `deliveryId`
+- MySQL `pending_delivery`：重启恢复、离线 `WAITING_SESSION`、同 ID 重试
+- 客户端 ACK、超时重试和客户端 deliveryId 去重
+- 有界 DB WorkerPool、优先级/保留容量、deferred ACK
+- Runtime Pending 条数/字节限制、Stream 准入、慢消费者保护
+- CTest、真实双节点集成、故障注入与可复现 benchmark
+
+## Architecture
+
+```text
+JSON / Protobuf clients
         │
-        ▼  TCP :6000  (JSON / Protobuf 双协议)
-┌───────────────────────────────────────┐
-│           ChatServer (Muduo)           │
-│  主 Reactor → 4 工作 Reactor 线程      │
-│       ↓ onMessage                     │
-│  ChatService (单例, shared_mutex)      │
-│   ├── ConnectionPool  (MySQL 长连接)   │
-│   ├── DBThreadPool    (异步 DB 写入)   │
-│   ├── RateLimiter     (令牌桶限流)     │
-│   └── Redis Pub/Sub   (跨服转发+重连)  │
-└───────┬──────────────────┬────────────┘
-        ▼                  ▼
-   ┌──────────┐     ┌──────────────┐
-   │ MySQL 8  │     │  Redis 7     │
-   │ 持久化    │     │  Pub/Sub     │
-   └──────────┘     └──────────────┘
+   ┌────┴───────────────┐
+   ▼                    ▼
+ChatServer A        ChatServer B
+Session/Router      Session/Router
+PendingManager      PendingManager
+   │                    │
+   └──── Redis ─────────┘
+        Presence + per-node Streams
+              │
+            MySQL
+      history + pending_delivery
 ```
 
-## 性能优化总览
+完整组件、线程和消息流程见 [Architecture](docs/architecture.md)；可靠性与故障语义见 [Reliability](docs/reliability.md)。
 
-| 优化阶段 | c=10 P50 | c=50 | c=100 | c=200 |
-|----------|----------|------|-------|-------|
-| 优化前（无连接池） | 2984ms | 注册失败 | 注册失败 | 注册失败 |
-| + MySQL 连接池 | **217ms** (-93%) | 通过 | 通过 | 注册失败 |
-| + shared_mutex + 批量查询 | 330ms | 通过 | 通过 | 注册失败 |
-| + **异步 DB 线程池** | **37ms** (-83%) | **43ms** | **60ms** | **109ms** |
-| **累计提升** | **-98.8%** | **突破** | **突破** | **突破** |
+## Message Lifecycle
 
-| 指标 | 优化前 | 优化后 | 提升 |
-|------|--------|--------|------|
-| c=10 P50 | 2984ms | 37ms | **×80** |
-| QPS | 75 | 8,195 | **×109** |
-| 群聊 mixed 5/20/50 | 全部失败 | 全部通过 | — |
+```text
+request
+  -> durable acceptance
+  -> WAITING_SESSION / PENDING
+  -> client receives deliveryId
+  -> client ACK
+  -> ACKED
+```
 
-## 技术栈
+- **Accepted**：对应 durable storage commit 成功。
+- **Delivered**：客户端收到消息，尚不代表服务端已持久处理 ACK。
+- **ACKed**：客户端 ACK 已在 durable store 完成。
+- **Read**：项目没有实现独立已读回执语义。
 
-| 层次 | 技术 | 说明 |
-|------|------|------|
-| 网络 | Muduo | 多 Reactor + one loop per thread |
-| 数据库 | MySQL 8.x | 连接池 + Prepared Statement |
-| 消息 | Redis 7.x | Pub/Sub 跨服转发 + 自动重连 |
-| 序列化 | JSON + Protobuf | 双协议共存 |
-| 安全 | SHA-256 (OpenSSL) | 密码哈希 + 盐值 |
-| 构建 | CMake 3.10+ | — |
-| 客户端 | Qt6 Widgets | MVC 架构 + Model/View |
-| 测试 | Python 压测脚本 | 多并发梯度自动执行 |
+## Project Structure
 
-## 功能特性
+```text
+conf/       示例和双节点配置
+docs/       架构、可靠性、部署、基准文档
+include/    服务端公共头文件
+proto/      Protobuf schema
+qt_client/  可选 Qt6 GUI 客户端
+script/     构建、数据库、运行、测试和故障注入入口
+sql/        fresh-install schema
+src/        ChatServer 与命令行客户端
+tests/      CTest 单元/组件测试
+```
 
-- 注册登录、状态管理、好友添加、群组创建与加入
-- 单聊 + 群聊在线实时转发，离线消息存储与推送
-- 聊天历史记录查询
-- 跨服务器消息转发（Redis Pub/Sub + 断线自动重连）
-- MySQL 连接池（RAII 归还 + 健康检查 + 自动重建）
-- 异步 DB 线程池（写操作不阻塞 IO 线程）
-- 令牌桶限流 + Redis 宕机降级 + MySQL 超时保护
-- JSON + Protobuf 双协议共存（首字节检测 + 桥接）
-- 密码 SHA-256 哈希 + Valgrind 零泄漏验证
+## Dependencies
 
-## 快速开始
-
-### 依赖
+已验证环境：Ubuntu 24.04.4、GCC 13.3、CMake、MySQL 8、Redis 7、Protobuf 3.21、Muduo、hiredis、OpenSSL、nlohmann/json；Python 3 用于集成测试。Qt6 仅 GUI 客户端需要。
 
 ```bash
-sudo apt install -y build-essential cmake g++ \
-  libmysqlclient-dev libhiredis-dev libprotobuf-dev protobuf-compiler \
-  nlohmann-json3-dev libssl-dev
+sudo apt update
+sudo apt install -y build-essential cmake git libboost-dev \
+  default-libmysqlclient-dev libhiredis-dev libprotobuf-dev \
+  protobuf-compiler nlohmann-json3-dev libssl-dev \
+  mysql-client redis-tools python3
 ```
 
-### 构建服务端
+Muduo 请安装到系统可搜索路径；Dockerfile 会自行构建 Muduo。
+
+## Build
 
 ```bash
 ./script/build.sh
+ctest --test-dir build --output-on-failure
 ```
 
-### 初始化数据库
+构建脚本会清理 `build/`，生成 C++ Protobuf binding，再构建 `bin/ChatServer` 与 `bin/ChatClient`。
+
+## Configuration
+
+复制并按环境修改示例：
 
 ```bash
-sudo mysql -u root -p < sql/chat.sql
-sudo mysql -u root -p < sql/chat_history.sql
-sudo mysql -u root -p -e "ALTER TABLE chat.user MODIFY password varchar(64) NOT NULL;"
+cp conf/chatserver.example.json conf/chatserver.local.json
 ```
 
-### 启动
+关键项包括监听地址、`node_id`、MySQL/Redis、DB queue、Pending 上限、ACK timeout/retry、offline claim、Stream soft limit 和 socket output watermarks。容器可使用 `CHAT_SERVER_*`、`CHAT_NODE_ID`、`CHAT_MYSQL_*`、`CHAT_REDIS_*` 覆盖连接参数，密码无需写入镜像。
+
+提交到仓库的 `chat_password`、`root_password` 只是本地演示占位值，不能用于真实部署。
+
+## Database Initialization
 
 ```bash
-sudo systemctl start redis-server
-./bin/ChatServer
-# 观察：ConnectionPool initialized → connect redis-server success!
+export CHAT_DB_ADMIN_PASSWORD='your-root-password'
+python3 script/init_db.py --config conf/chatserver.local.json
 ```
 
-### 构建 Qt 客户端
+该入口会创建数据库/应用用户、应用 fresh schema，并补齐 Phase 7 的 nullable column 和索引；可重复运行。旧环境仍可单独使用 `migrate_phase6.py`、`migrate_phase7.py`。
+
+Redis 不需要手动初始化，节点注册、Presence key、Stream 和 Consumer Group 由服务端创建。
+
+## Run Single Node
 
 ```bash
-cd qt_client
-./build.sh
-./build/QtChatClient
+./script/run_server.sh conf/chatserver.local.json
 ```
 
-### 运行压测
+JSON 客户端：
 
 ```bash
-python3 script/bench_onechat.py       # 单聊 (10→500 并发)
-python3 script/bench_groupchat.py     # 群聊 (5→50 人群)
-# 报告 → docs/bench_results/
+./script/run_client.sh 127.0.0.1 6000
 ```
 
-## 目录结构
+Protobuf 客户端：
 
-```
-├── conf/                  # 服务端配置
-├── include/server/        # 头文件
-│   ├── db/               # 连接池
-│   ├── model/             # User/Friend/Group/Offline/ChatHistory
-│   ├── redis/             # Redis Pub/Sub
-│   └── utils/             # 密码哈希 / 限流器 / DB 线程池
-├── src/server/            # 服务端源码
-├── proto/                 # Protobuf 定义
-├── qt_client/             # Qt6 客户端（独立 CMake 项目）
-├── script/                # 构建 + 压测脚本
-├── sql/                   # 数据库初始化
-├── docs/                  # 压测报告 + 架构文档
-└── Dockerfile / docker-compose.yml
+```bash
+./bin/ChatClient 127.0.0.1 6000 --proto
 ```
 
-## 优化技术清单
+## Run Two Nodes
 
-| # | 优化项 | 技术 | 效果 |
-|---|--------|------|------|
-| 1 | 连接池 | shared_ptr + 自定义 deleter | TCP 握手瓶颈消除 |
-| 2 | 热点锁 | shared_mutex 读写分离 | 多线程并发读 |
-| 3 | 批量查询 | WHERE id IN (...) | N+1 → 1 次查询 |
-| 4 | 异步 DB | 独立线程池 + fire-and-forget | IO 线程零阻塞 |
-| 5 | 内存安全 | Valgrind Memcheck | 零泄漏验证 |
-| 6 | 崩溃排查 | dmesg + addr2line + GDB | segfault 精确定位 |
-| 7 | 双协议 | Protobuf + JSON 桥接 | 零停机迁移 |
-| 8 | 故障降级 | 超时 + Redis 降级 + 限流 | 优雅容错 |
-| 9 | 密码安全 | SHA-256 + 盐值 (OpenSSL) | 非明文存储 |
-| 10 | 工程化 | Docker Compose + 配置化 | 一键部署 |
+`conf/chatserver-node-a.json` 和 `conf/chatserver-node-b.json` 分别监听 6000/6001，并使用不同 `node_id`：
 
-## 核心数据
+```bash
+./script/run_cluster.sh
+python3 script/demo_two_node.py
+./script/stop_cluster.sh
+```
 
-> P50 延迟 2984ms→37ms 降 98.8%，QPS 75→8195 升 109 倍，并发 200 零丢失。用 dmesg+addr2line+GDB 定位 segfault，Valgrind 验证零泄漏。shared_mutex 读写锁 + 异步 DB 线程池 + 群聊 N+1 批量查询。Protobuf 双协议共存 + 令牌桶限流 + Redis 降级自动重连。
+## Docker Compose
+
+```bash
+cp .env.example .env
+docker compose build
+docker compose up -d
+docker compose ps
+python3 script/demo_two_node.py
+docker compose down -v
+```
+
+Compose 从 fresh MySQL volume 启动 MySQL、Redis、Node A（6000）和 Node B（6001），并等待依赖 healthcheck。详细说明见 [Deployment](docs/deployment.md)。
+
+## Qt Client
+
+```bash
+QT_ROOT=/path/to/Qt/6.x/gcc_64 ./qt_client/build.sh
+./qt_client/build/bin/ChatClient
+```
+
+若 Qt6 已安装到标准路径，可省略 `QT_ROOT`。
+
+## Testing
+
+快速完整可靠性回归（要求本机 MySQL/Redis 已就绪）：
+
+```bash
+./script/test_all.sh
+```
+
+包含 Phase 3–7。较慢的 500/1000 离线积压、Phase 8 fault injection 和压力测试：
+
+```bash
+./script/test_all.sh --full
+```
+
+Python binding 可独立生成：
+
+```bash
+./script/gen_python_proto.sh
+```
+
+## Benchmark
+
+Phase 8 最终单 VM 样本：
+
+| Workload | Protocol | Accepted | Rejected | Unique QPS | P50/P95/P99 |
+|---|---|---:|---:|---:|---|
+| 10×100 | JSON | 1000 | 0 | 449.8 | 619/1264/1308 ms |
+| 20×100 | JSON | 2000 | 0 | 774.9 | 1461/1701/1740 ms |
+| 50×100 | JSON | 4516 | 484 | 715.1 | 2993/4928/5250 ms |
+| 10×100 | Protobuf | 1000 | 0 | 472.8 | 681/1231/1256 ms |
+
+50×100 的 484 条在 durable acceptance 前明确拒绝，不是静默丢失。完整条件与限制见 [Benchmark](docs/benchmark.md)。
+
+## Failure Injection
+
+- `phase6_phase3_regression.py`：ACK 丢失、同 deliveryId 重试和去重
+- `phase5_stream_integration.py`：kill -9、PEL/XAUTOCLAIM、Redis reconnect
+- `phase6_durable_pending_integration.py`：persist/send/ACK crash windows
+- `phase7_offline_inbox_integration.py`：离线、迁移、重启和容量恢复
+- `phase8_backpressure_integration.py`：DB 饱和、慢消费者、Stream 过载
+
+## Evolution Roadmap
+
+| Phase | Problem | Decision |
+|---:|---|---|
+| 1 | user/connection ownership | SessionManager |
+| 2 | protocol/business coupling | Codec + Envelope + Router |
+| 3 | TCP send 不等于确认送达 | deliveryId + ACK + retry |
+| 4 | 用户位于其他节点 | Presence + owner node routing |
+| 5 | Pub/Sub 不可恢复 | Redis Streams + PEL/XAUTOCLAIM |
+| 6 | 进程重启丢失 Pending | MySQL durable pending |
+| 7 | 在线/离线生命周期分裂 | unified durable inbox |
+| 8 | 过载导致资源增长和 ACK 饥饿 | bounded backpressure |
+| 9 | 难以复现部署和展示 | packaging + verified deployment |
+
+## Known Limitations
+
+- At-Least-Once，不是 Exactly Once；客户端必须按 deliveryId 去重。
+- ACK 不是 read receipt。
+- Redis/MySQL 是外部依赖，部署持久性取决于它们的配置。
+- 少量 legacy MySQL/Redis 调用仍可能同步执行于 I/O 路径。
+- 群聊尚未实现 durable fan-out；Binary 路径未完全统一到 reliable delivery。
+- Benchmark 仅为 Redis/MySQL 同机的单 VM、debug-style、单样本结果；没有内核调优或生产网络延迟。
+- Qt GUI 当前连接地址仍固定为 `127.0.0.1:6000`；可配置客户端地址属于后续 UI 配置工作。
+- 未提供 Kubernetes、service mesh 或完整 Prometheus/OpenTelemetry 栈。
 
 ## License
 

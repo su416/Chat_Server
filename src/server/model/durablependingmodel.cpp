@@ -1,5 +1,6 @@
 #include "model/durablependingmodel.hpp"
 #include "connectionpool.h"
+#include "config.hpp"
 #include "json.hpp"
 
 #include <muduo/base/Logging.h>
@@ -14,7 +15,6 @@
 namespace gateway {
 namespace {
 constexpr std::uint64_t kRetentionMs = 24ULL * 60 * 60 * 1000;
-constexpr std::uint64_t kAckTimeoutMs = 2000;
 
 std::shared_ptr<MySQL> borrow() {
     // Never block a DB worker indefinitely when the pool is depleted.
@@ -98,7 +98,8 @@ PersistResult DurablePendingModel::persist(
         (routeId.empty() ? std::string("NULL") : quoted(conn, routeId)) + "," +
         quoted(conn, nodeId) + "," + std::to_string(receiverUserId) + "," +
         std::to_string(messageType) + "," + quoted(conn, payload) + ",0," +
-        std::to_string(nowMs + kAckTimeoutMs) + "," +
+        std::to_string(nowMs + static_cast<std::uint64_t>(
+            Config::instance().getAckTimeoutMs())) + "," +
         std::to_string(nowMs + kRetentionMs) + ",0," +
         std::to_string(nowMs) + "," + std::to_string(nowMs) + ")";
     if (mysql_query(conn, sql.c_str()) == 0) {
@@ -109,7 +110,8 @@ PersistResult DurablePendingModel::persist(
         row.receiverUserId = receiverUserId;
         row.messageType = messageType;
         row.payload = payload;
-        row.nextRetryAtMs = nowMs + kAckTimeoutMs;
+        row.nextRetryAtMs = nowMs + static_cast<std::uint64_t>(
+            Config::instance().getAckTimeoutMs());
         row.expireAtMs = nowMs + kRetentionMs;
         return {PersistStatus::Inserted, std::move(row)};
     }
@@ -353,7 +355,8 @@ std::optional<std::vector<DurablePendingRecord>> DurablePendingModel::claimForUs
         if (row.payload.size() > maxBytes - claimedBytes) break;
         // Claim is durable before the ordered initial send. The scanner may
         // retry only after the regular ACK timeout.
-        const auto next = nowMs + kAckTimeoutMs;
+        const auto next = nowMs + static_cast<std::uint64_t>(
+            Config::instance().getAckTimeoutMs());
         if (!execute(conn, "UPDATE pending_delivery SET owner_node=" + quoted(conn, node) +
             ",state=0,retry_count=" +
             std::to_string(row.state == DurableState::WaitingSession ? 0 : row.retryCount) +

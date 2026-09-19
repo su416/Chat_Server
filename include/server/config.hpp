@@ -51,6 +51,11 @@ public:
     int getOutputHighWatermarkBytes() const;
     int getOutputHardLimitBytes() const;
     int getStreamSoftLimit() const;
+    int getAckTimeoutMs() const;
+    int getMaxRetries() const;
+    int getPendingMaxEntries() const;
+    int getPendingMaxBytes() const;
+    int getDeferredAckMaxEntries() const;
 
 private:
     Config() = default;

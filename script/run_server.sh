@@ -12,4 +12,5 @@ if [ ! -f "./bin/ChatServer" ]; then
 fi
 
 echo "starting ChatServer..."
-./bin/ChatServer
+CONFIG=${1:-conf/chatserver.json}
+./bin/ChatServer "$CONFIG"

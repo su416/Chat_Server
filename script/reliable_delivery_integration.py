@@ -15,7 +15,10 @@ from reliable_client import RecentDeliveryIds, handle_one_chat
 try:
     import chat_pb2
 except ImportError:
-    chat_pb2 = None
+    try:
+        from proto_gen import chat_pb2
+    except ImportError:
+        chat_pb2 = None
 
 HOST, PORT = "127.0.0.1", 6000
 ONE_CHAT_MSG_ACK = 18  # include/public.hpp; error/overload response

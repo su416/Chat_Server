@@ -1,0 +1,10 @@
+{
+  "server": {"ip":"127.0.0.1","port":6001,"thread_num":4,"name":"ChatServer-B","node_id":"chat-server-b"},
+  "mysql": {"host":"127.0.0.1","port":3306,"user":"chat","password":"chat_password","dbname":"chat","charset":"utf8mb4"},
+  "redis": {"host":"127.0.0.1","port":6379},
+  "protocol": {"use_protobuf_history":true},
+  "log": {"level":"INFO"},
+  "business": {"max_history_count":50},
+  "rate_limit": {"enabled":false,"capacity":1000,"rate_per_sec":10000.0},
+  "flow": {"db_worker_threads":4,"db_max_queue_size":2048,"offline_claim_batch":32,"offline_users_per_round":4,"output_high_watermark_bytes":4194304,"output_hard_limit_bytes":8388608,"stream_soft_limit":8000,"ack_timeout_ms":2000,"max_retries":2,"pending_max_entries":10000,"pending_max_bytes":16777216,"deferred_ack_max_entries":10000}
+}
