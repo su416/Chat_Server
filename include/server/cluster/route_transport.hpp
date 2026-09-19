@@ -33,6 +33,9 @@ struct RouteMetrics {
     std::uint64_t produced = 0, consumed = 0, acked = 0;
     std::uint64_t retried = 0, claimed = 0, duplicate = 0, failed = 0;
     std::uint64_t pending = 0;
+    std::uint64_t streamLength = 0, streamPeak = 0;
+    std::uint64_t oldestPendingMs = 0, lag = 0, overloadRejected = 0;
+    std::uint64_t targetStreamPeak = 0;
 };
 
 // 每节点一条 Stream + Consumer Group；routeId 与目标节点 deliveryId 不同。
@@ -46,7 +49,8 @@ public:
     // Accepted / Duplicate / Error. Marker is written only after local Pending accepted.
     enum class DedupResult { New, Duplicate, Error };
     DedupResult markAccepted(const std::string& routeId);
-    RouteMetrics metrics() const;
+    // Production snapshots are cached; explicit fresh=true is for diagnostics/tests.
+    RouteMetrics metrics(bool fresh = false) const;
     std::string nextRouteId();
     static std::string streamFor(const std::string& nodeId);
 
@@ -66,6 +70,9 @@ private:
     std::atomic<std::uint64_t> _next{1};
     std::atomic<std::uint64_t> _produced{0}, _consumed{0}, _acked{0},
         _retried{0}, _claimed{0}, _duplicate{0}, _failed{0};
+    std::atomic<std::uint64_t> _streamLength{0}, _streamPeak{0},
+        _pending{0}, _oldestPendingMs{0}, _lag{0}, _overloadRejected{0},
+        _targetStreamPeak{0};
 };
 
 } // namespace cluster

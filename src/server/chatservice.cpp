@@ -4,6 +4,7 @@
 #include "password_utils.hpp"
 #include "rate_limiter.hpp"
 #include "db_thread_pool.hpp"
+#include "connectionpool.h"
 #include <muduo/base/Logging.h>
 #include <vector>
 #include "proto_utils.hpp"
@@ -14,6 +15,7 @@
 #include <cstdlib>
 #include <future>
 #include <algorithm>
+#include <chrono>
 
 using namespace std;
 using namespace muduo;
@@ -83,6 +85,12 @@ ChatService::ChatService()
 // 服务器异常，业务重置方法
 void ChatService::reset()
 {
+    {
+        std::lock_guard<std::mutex> lock(_heartbeatMutex);
+        _heartbeatStop = true;
+    }
+    _heartbeatCv.notify_all();
+    if (_heartbeatWorker.joinable()) _heartbeatWorker.join();
     _route.stop();
     _mainLoop.store(nullptr);
     for (const auto& [userId, sessionId] : _sessionManager.activeSessions())
@@ -372,9 +380,13 @@ void ChatService::oneChat(const TcpConnectionPtr &conn, json &js, Timestamp time
     string name = js.value("name", "");
     string extra = name.empty() ? "" : json{{"name", name}}.dump();
     auto recordHistory = [this, fromid, toid, msg, extra]() {
-        DBThreadPool::instance()->submitVoid([this, fromid, toid, msg, extra]() {
+        if (DBThreadPool::instance()->submitVoid([this, fromid, toid, msg, extra]() {
             _chatHistoryModel.insertOneChat(fromid, toid, msg, 0, extra);
-        });
+        }) != DBThreadPool::SubmitResult::Accepted) {
+            const auto count = ++_historyRejected;
+            if (count == 1 || count % 100 == 0)
+                LOG_WARN << "HISTORY_QUEUE_REJECTED count=" << count;
+        }
     };
 
     if (auto session = _sessionManager.sessionForUser(toid))
@@ -644,9 +656,13 @@ void ChatService::groupChat(const TcpConnectionPtr &conn, json &js, Timestamp ti
     {
         string gname = js.value("name", "");
         string gextra = gname.empty() ? "" : json{{"name", gname}}.dump();
-        DBThreadPool::instance()->submitVoid([this, userid, groupid, msg, gextra]() {
+        if (DBThreadPool::instance()->submitVoid([this, userid, groupid, msg, gextra]() {
             _chatHistoryModel.insertGroupChat(userid, groupid, msg, 0, gextra);
-        });
+        }) != DBThreadPool::SubmitResult::Accepted) {
+            const auto count = ++_historyRejected;
+            if (count == 1 || count % 100 == 0)
+                LOG_WARN << "GROUP_HISTORY_QUEUE_REJECTED count=" << count;
+        }
     }
 
     vector<int> useridVec = _groupModel.queryGroupUsers(userid, groupid);
@@ -698,16 +714,20 @@ ChatService::RouteStatus ChatService::routeToUser(
         return RouteStatus::Error;
     }
     ++_routeRemote;
-    LOG_INFO << "ROUTE_REMOTE id=" << route.routeId << " target=" << route.targetNode;
+    LOG_DEBUG << "ROUTE_REMOTE id=" << route.routeId << " target=" << route.targetNode;
     return RouteStatus::Sent;
 }
 
 void ChatService::storeLegacyGroupOffline(int senderId, int receiverId, const json& payload)
 {
     const auto encoded = payload.dump();
-    DBThreadPool::instance()->submitVoid([this, senderId, receiverId, encoded]() {
+    if (DBThreadPool::instance()->submitVoid([this, senderId, receiverId, encoded]() {
         _chatHistoryModel.insertOneChat(senderId, receiverId, encoded, 2);
-    });
+    }) != DBThreadPool::SubmitResult::Accepted) {
+        const auto count = ++_historyRejected;
+        if (count == 1 || count % 100 == 0)
+            LOG_ERROR << "GROUP_OFFLINE_QUEUE_REJECTED count=" << count;
+    }
 }
 
 void ChatService::storeDurableOffline(
@@ -912,6 +932,7 @@ bool ChatService::activateDurable(
     if (!target || !target->connected()) return false;
     if (target->getLoop() != muduo::net::EventLoop::getEventLoopOfCurrentThread())
         return false;
+    if (ChatServer::isBackpressured(target)) return false;
     if (_sessionManager.sessionForUser(session->userId()) != session ||
         !_presence.ownsUser(session->userId(), session->id())) return false;
     try {
@@ -923,7 +944,7 @@ bool ChatService::activateDurable(
             session, delivery, record.retryCount);
         if (restored == gateway::RestoreResult::CapacityExceeded) return false;
         if (restored == gateway::RestoreResult::Inserted) {
-            LOG_INFO << "DURABLE_DELIVERY_SEND id=" << record.deliveryId
+            LOG_DEBUG << "DURABLE_DELIVERY_SEND id=" << record.deliveryId
                      << " user=" << record.receiverUserId;
             ChatServer::sendResponse(target, delivery);
         }
@@ -1033,10 +1054,20 @@ void ChatService::recoverForSession(
 {
     auto target = session ? session->connection() : nullptr;
     if (!target) return;
+    if (ChatServer::isBackpressured(target)) {
+        std::lock_guard<std::mutex> lock(_inboxMutex);
+        _inboxInFlight.erase(session->userId());
+        return;
+    }
     auto* loop = target->getLoop();
     const auto user = session->userId();
     const auto node = _presence.nodeId();
-    const auto limit = std::min<std::size_t>(32, _pendingDeliveries.availableSlots());
+    const auto queue = DBThreadPool::instance()->metrics();
+    const auto reserved = queue.capacity / 4;
+    const auto headroom = queue.depth < queue.capacity - reserved
+        ? queue.capacity - reserved - queue.depth : 0;
+    const auto limit = std::min({static_cast<std::size_t>(Config::instance().getOfflineClaimBatch()),
+                                 _pendingDeliveries.availableSlots(), headroom});
     const auto maxBytes = _pendingDeliveries.availableBytes();
     if (!limit || !maxBytes) {
         std::lock_guard<std::mutex> lock(_inboxMutex);
@@ -1099,7 +1130,7 @@ void ChatService::recoverForSession(
                 for (const auto& row : *rows)
                     if (activateDurable(current, row)) ++_offlineRecovered;
             });
-        })) {
+        }, DBThreadPool::Priority::Low)) {
         std::lock_guard<std::mutex> lock(_inboxMutex);
         _inboxInFlight.erase(user);
         ++_durableDbFailed;
@@ -1112,7 +1143,8 @@ void ChatService::scanInboxRecovery()
     {
         std::lock_guard<std::mutex> lock(_inboxMutex);
         const auto candidates = _inboxOrder.size();
-        for (std::size_t i = 0; i < candidates && users.size() < 4; ++i) {
+        for (std::size_t i = 0; i < candidates &&
+             users.size() < static_cast<std::size_t>(Config::instance().getOfflineUsersPerRound()); ++i) {
             const int user = _inboxOrder.front();
             _inboxOrder.pop_front();
             if (!_inboxQueued.count(user)) continue;
@@ -1128,7 +1160,20 @@ void ChatService::scanInboxRecovery()
             _inboxInFlight.erase(user);
             continue;
         }
-        recoverForSession(session);
+        auto target = session->connection();
+        if (!target) {
+            std::lock_guard<std::mutex> lock(_inboxMutex);
+            _inboxInFlight.erase(user);
+            continue;
+        }
+        std::weak_ptr<const gateway::Session> weak = session;
+        target->getLoop()->runInLoop([this, weak, user]() {
+            if (auto current = weak.lock()) recoverForSession(current);
+            else {
+                std::lock_guard<std::mutex> lock(_inboxMutex);
+                _inboxInFlight.erase(user);
+            }
+        });
     }
 }
 
@@ -1205,27 +1250,16 @@ void ChatService::messageAck(const TcpConnectionPtr &conn, json &js, Timestamp)
     {
         auto session = _sessionManager.sessionForConnection(conn);
         if (!session) return;
-        const int userId = session->userId();
-        const auto id = *deliveryId;
-        auto* loop = conn->getLoop();
-        if (!DBThreadPool::instance()->trySubmitDurable([this, loop, id, userId]() {
-                const auto persisted = _durablePendingModel.markAcked(
-                    id, userId, gateway::unixMillis());
-                loop->queueInLoop([this, id, persisted]() {
-                    if (persisted == gateway::DurableAckStatus::Error) {
-                        ++_durableDbFailed;
-                        LOG_ERROR << "DURABLE_ACK failed id=" << id;
-                        return;
-                    }
-                    if (_pendingDeliveries.completeDurableAck(id)) {
-                        ++_durableAcked;
-                        LOG_DEBUG << "DELIVERY_ACK id=" << id;
-                    }
-                });
-            })) {
-            ++_durableDbFailed;
-            LOG_ERROR << "DURABLE_ACK queue full id=" << id;
+        {
+            std::lock_guard<std::mutex> lock(_ackMutex);
+            if (_deferredAcks.size() >= 10000 && !_deferredAcks.count(*deliveryId)) {
+                ++_durableDbFailed;
+                LOG_ERROR << "DURABLE_ACK deferred capacity exhausted id=" << *deliveryId;
+                return;
+            }
+            _deferredAcks.emplace(*deliveryId, session->userId());
         }
+        submitDeferredAck(*deliveryId, session->userId());
     }
     else if (result == gateway::AckResult::Unknown)
     {
@@ -1237,8 +1271,62 @@ void ChatService::messageAck(const TcpConnectionPtr &conn, json &js, Timestamp)
     }
 }
 
+void ChatService::submitDeferredAck(std::uint64_t id, int userId)
+{
+    {
+        std::lock_guard<std::mutex> lock(_ackMutex);
+        if (!_deferredAcks.count(id) || !_ackInFlight.insert(id).second) return;
+    }
+    if (!DBThreadPool::instance()->trySubmitDurable([this, id, userId]() {
+        const auto persisted = _durablePendingModel.markAcked(
+            id, userId, gateway::unixMillis());
+        {
+            std::lock_guard<std::mutex> lock(_ackMutex);
+            _ackInFlight.erase(id);
+            if (persisted != gateway::DurableAckStatus::Error)
+                _deferredAcks.erase(id);
+        }
+        if (persisted == gateway::DurableAckStatus::Error) {
+            ++_durableDbFailed;
+            const auto failures = ++_ackDbFailures;
+            if (failures == 1 || failures % 100 == 0)
+                LOG_WARN << "DURABLE_ACK deferred failures=" << failures;
+        } else if (persisted == gateway::DurableAckStatus::Terminal) {
+            LOG_WARN << "DURABLE_ACK terminal id=" << id;
+            _pendingDeliveries.cancel(id);
+        } else if (_pendingDeliveries.completeDurableAck(id)) {
+            ++_durableAcked;
+            LOG_DEBUG << "DELIVERY_ACK id=" << id;
+        }
+    }, DBThreadPool::Priority::High)) {
+        std::lock_guard<std::mutex> lock(_ackMutex);
+        _ackInFlight.erase(id);
+        ++_ackDeferredTotal;
+    }
+}
+
+void ChatService::scanDeferredAcks()
+{
+    std::vector<std::pair<std::uint64_t, int>> batch;
+    {
+        std::lock_guard<std::mutex> lock(_ackMutex);
+        for (const auto& entry : _deferredAcks) {
+            if (!_ackInFlight.count(entry.first)) batch.push_back(entry);
+            if (batch.size() == 128) break;
+        }
+    }
+    for (const auto& [id, user] : batch) submitDeferredAck(id, user);
+}
+
+bool ChatService::hasDeferredAck(std::uint64_t id) const
+{
+    std::lock_guard<std::mutex> lock(_ackMutex);
+    return _deferredAcks.count(id) != 0;
+}
+
 void ChatService::scanReliableDeliveries()
 {
+    scanDeferredAcks();
     scanInboxRecovery();
     if (_durableScanInFlight.exchange(true)) return;
     auto* mainLoop = _mainLoop.load();
@@ -1287,7 +1375,7 @@ void ChatService::scanReliableDeliveries()
                 if (!due) { ++_durableDbFailed; return; }
                 for (auto& row : *due) handleDueDurableRecord(std::move(row));
             });
-        })) {
+        }, DBThreadPool::Priority::Low)) {
         _durableScanInFlight = false;
         ++_durableDbFailed;
     }
@@ -1301,6 +1389,7 @@ void ChatService::handleDueDurableRecord(gateway::DurablePendingRecord record)
     if (!loop) return;
     std::weak_ptr<const gateway::Session> weak = session;
     loop->queueInLoop([this, weak, record = std::move(record), loop]() mutable {
+        if (hasDeferredAck(record.deliveryId)) return;
         auto current = weak.lock();
         auto target = current ? current->connection() : nullptr;
         const auto now = gateway::unixMillis();
@@ -1345,6 +1434,7 @@ void ChatService::handleDueDurableRecord(gateway::DurablePendingRecord record)
                 })) ++_durableDbFailed;
             return;
         }
+        if (ChatServer::isBackpressured(target)) return;
         if (record.retryCount >= 2) {
             if (!DBThreadPool::instance()->trySubmitDurable(
                 [this, loop, id = record.deliveryId, now]() {
@@ -1394,7 +1484,7 @@ void ChatService::handleDueDurableRecord(gateway::DurablePendingRecord record)
                         !_presence.ownsUser(record.receiverUserId, current->id())) return;
                     if (!_pendingDeliveries.markDurableRetry(
                             record.deliveryId, record.retryCount + 1)) return;
-                    LOG_INFO << "DURABLE_DELIVERY_RETRY id=" << record.deliveryId
+                    LOG_DEBUG << "DURABLE_DELIVERY_RETRY id=" << record.deliveryId
                              << " count=" << record.retryCount + 1;
                     ChatServer::sendResponse(target, delivery);
                 });
@@ -1406,6 +1496,21 @@ void ChatService::heartbeatPresence()
 {
     if (!_presence.heartbeat(_sessionManager.activeSessions()))
         LOG_ERROR << "PRESENCE_HEARTBEAT failed node=" << _presence.nodeId();
+}
+
+void ChatService::startHeartbeat()
+{
+    if (_heartbeatWorker.joinable()) return;
+    _heartbeatWorker = std::thread([this]() {
+        std::unique_lock<std::mutex> lock(_heartbeatMutex);
+        while (!_heartbeatCv.wait_for(lock, std::chrono::seconds(5),
+                                      [this] { return _heartbeatStop; })) {
+            lock.unlock();
+            syncServerConnections();
+            heartbeatPresence();
+            lock.lock();
+        }
+    });
 }
 
 void ChatService::logClusterMetrics() const
@@ -1431,12 +1536,25 @@ void ChatService::logClusterMetrics() const
              << " route_duplicate=" << route.duplicate
              << " route_transport_failed=" << route.failed
              << " route_pending=" << route.pending
+             << " stream_length=" << route.streamLength
+             << " stream_peak=" << route.streamPeak
+             << " stream_oldest_pending_ms=" << route.oldestPendingMs
+             << " stream_lag=" << route.lag
+             << " stream_overload_rejected=" << route.overloadRejected
+             << " target_stream_peak=" << route.targetStreamPeak
              << " node_heartbeat=" << presence.nodeHeartbeat;
 }
 
 void ChatService::logDeliveryMetrics() const
 {
     const auto metrics = _pendingDeliveries.metrics();
+    const auto db = DBThreadPool::instance()->metrics();
+    const auto output = ChatServer::outputMetrics();
+    std::size_t deferredAckCount = 0;
+    {
+        std::lock_guard<std::mutex> lock(_ackMutex);
+        deferredAckCount = _deferredAcks.size();
+    }
     LOG_INFO << "DELIVERY_METRICS sent=" << metrics.sent
              << " acked=" << metrics.acked
              << " retried=" << metrics.retried
@@ -1450,6 +1568,10 @@ void ChatService::logDeliveryMetrics() const
              << " durable_recovered=" << _durableRecovered.load()
              << " durable_acked=" << _durableAcked.load()
              << " durable_db_failed=" << _durableDbFailed.load()
+             << " ack_deferred=" << deferredAckCount
+             << " ack_enqueue_rejected=" << _ackDeferredTotal.load()
+             << " ack_db_failures=" << _ackDbFailures.load()
+             << " history_queue_rejected=" << _historyRejected.load()
              << " durable_waiting_created=" << _waitingCreated.load()
              << " durable_waiting_claimed=" << _waitingClaimed.load()
              << " durable_waiting_requeued=" << _waitingRequeued.load()
@@ -1458,5 +1580,18 @@ void ChatService::logDeliveryMetrics() const
              << " legacy_offline_migrated=" << _legacyMigrated.load()
              << " legacy_offline_failed=" << _legacyFailed.load()
              << " db_pending=" << _dbPendingCount.load()
-             << " db_waiting=" << _dbWaitingCount.load();
+             << " db_waiting=" << _dbWaitingCount.load()
+             << " db_queue_depth=" << db.depth
+             << " db_queue_capacity=" << db.capacity
+             << " db_queue_peak=" << db.peak
+             << " db_tasks_rejected=" << db.rejected
+             << " db_active_workers=" << db.activeWorkers
+             << " db_connection_wait_ms=" << ConnectionPool::instance()->totalWaitMs()
+             << " db_connection_wait_count=" << ConnectionPool::instance()->waitCount()
+             << " active_connections=" << output.activeConnections
+             << " slow_consumers=" << output.slowConsumers
+             << " output_buffer_highwater=" << output.highwaterEvents
+             << " output_buffer_peak_bytes=" << output.outputPeakBytes
+             << " queued_output_peak_bytes=" << output.queuedPeakBytes
+             << " slow_consumer_disconnects=" << output.hardDisconnects;
 }

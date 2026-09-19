@@ -10,6 +10,8 @@
 #include <mutex>
 #include <unordered_set>
 #include <deque>
+#include <thread>
+#include <condition_variable>
 
 using namespace std;
 using namespace muduo;
@@ -51,6 +53,7 @@ public:
     void scanReliableDeliveries();
     void logDeliveryMetrics() const;
     void heartbeatPresence();
+    void startHeartbeat();
     void logClusterMetrics() const;
     void setMainLoop(muduo::net::EventLoop* loop) { _mainLoop.store(loop); }
     // 添加好友业务
@@ -99,6 +102,9 @@ private:
     void recoverForSession(const std::shared_ptr<const gateway::Session>& session);
     void scanInboxRecovery();
     void enqueueInbox(int userId);
+    void submitDeferredAck(std::uint64_t deliveryId, int userId);
+    void scanDeferredAcks();
+    bool hasDeferredAck(std::uint64_t deliveryId) const;
     void storeDurableOffline(int senderId, int receiverId, const json& payload,
                              const TcpConnectionPtr& sender,
                              std::function<void()> accepted);
@@ -138,6 +144,16 @@ private:
     std::atomic<std::uint64_t> _durableExpired{0};
     std::atomic<int> _waitingCursor{0};
     std::atomic<std::size_t> _dbPendingCount{0}, _dbWaitingCount{0};
+    mutable std::mutex _ackMutex;
+    std::unordered_map<std::uint64_t, int> _deferredAcks;
+    std::unordered_set<std::uint64_t> _ackInFlight;
+    std::atomic<std::uint64_t> _ackDeferredTotal{0};
+    std::atomic<std::uint64_t> _ackDbFailures{0};
+    std::atomic<std::uint64_t> _historyRejected{0};
+    std::thread _heartbeatWorker;
+    std::mutex _heartbeatMutex;
+    std::condition_variable _heartbeatCv;
+    bool _heartbeatStop = false;
 };
 
 #endif

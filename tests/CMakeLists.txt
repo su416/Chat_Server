@@ -81,6 +81,12 @@ add_executable(test_pending_delivery_manager
 )
 target_link_libraries(test_pending_delivery_manager
     ${COMMON_LIBS} muduo_net muduo_base pthread)
+
+add_executable(test_db_thread_pool
+    test_db_thread_pool.cpp
+    ${PROJECT_SOURCE_DIR}/src/server/utils/db_thread_pool.cpp
+)
+target_link_libraries(test_db_thread_pool ${COMMON_LIBS} muduo_base pthread)
 target_link_libraries(test_message_router
     ${COMMON_LIBS}
     muduo_net
@@ -119,7 +125,7 @@ endif()
 
 # --- 注册到 CTest ---
 enable_testing()
-foreach(test_name test_rate_limiter test_jsoncodec test_protocodec test_password_utils test_session_manager test_message_decoder test_message_router test_pending_delivery_manager test_friendlistmodel test_cluster)
+foreach(test_name test_rate_limiter test_jsoncodec test_protocodec test_password_utils test_session_manager test_message_decoder test_message_router test_pending_delivery_manager test_db_thread_pool test_friendlistmodel test_cluster)
     if(TARGET ${test_name})
         add_test(NAME ${test_name} COMMAND $<TARGET_FILE:${test_name}>)
     endif()

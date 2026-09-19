@@ -20,10 +20,12 @@ ROOT = Path(__file__).resolve().parent.parent
 RUN_ID = f"phase4_{int(time.time())}_{os.getpid()}"
 
 
-def start_server(folder, node, port, redis_port=6379, extra_env=None):
+def start_server(folder, node, port, redis_port=6379, extra_env=None, flow=None):
     config = json.loads((ROOT / "conf/chatserver.json").read_text())
     config["server"].update({"node_id": node, "name": f"ChatServer-{node}", "port": port})
     config["redis"]["port"] = redis_port
+    if flow:
+        config.setdefault("flow", {}).update(flow)
     path = folder / f"{node}.json"
     path.write_text(json.dumps(config))
     log = (folder / f"{node}.log").open("w+")

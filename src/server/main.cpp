@@ -35,7 +35,7 @@ int main(int argc, char **argv)
     // 初始化数据库连接池
     {
         auto& cfg = Config::instance();
-        int poolSize = cfg.getThreadNum();  // 一线程一连接
+        int poolSize = cfg.getDbWorkerThreads();  // DB worker 每线程一连接
         ConnectionPool::instance()->init(
             cfg.getMySQLHost(), cfg.getMySQLPort(),
             cfg.getMySQLUser(), cfg.getMySQLPassword(),
@@ -56,7 +56,9 @@ int main(int argc, char **argv)
     }
 
     // 初始化 DB 线程池（用于异步 DB 写入，线程数 = Muduo 线程数）
-    DBThreadPool::instance()->init(Config::instance().getThreadNum());
+    DBThreadPool::instance()->init(Config::instance().getDbWorkerThreads(),
+        static_cast<std::size_t>(Config::instance().getDbMaxQueueSize()),
+        static_cast<std::size_t>(Config::instance().getDbMaxQueueSize() / 4));
 
     // 触发 ChatService 单例初始化（连接 Redis、注册消息处理器）
     ChatService::instance();
@@ -81,6 +83,7 @@ int main(int argc, char **argv)
     );
 
     server.start();
+    ChatService::instance()->startHeartbeat();
 
     // 向 Redis 注册本 ChatServer 实例（服务发现 + 负载均衡）
     {
@@ -92,8 +95,6 @@ int main(int argc, char **argv)
 
     // 定期心跳：每 5 秒更新连接数到 Redis
     loop.runEvery(5.0, []() {
-        ChatService::instance()->syncServerConnections();
-        ChatService::instance()->heartbeatPresence();
         ChatService::instance()->logDeliveryMetrics();
         ChatService::instance()->logClusterMetrics();
     });

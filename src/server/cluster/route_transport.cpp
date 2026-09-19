@@ -3,6 +3,8 @@
 #include <muduo/base/Logging.h>
 #include <chrono>
 #include <thread>
+#include <algorithm>
+#include <cstdlib>
 
 namespace cluster {
 namespace {
@@ -151,14 +153,27 @@ bool RouteTransport::send(const RoutedMessage& message) {
     const auto key = streamFor(message.targetNode);
     // Fail closed at capacity: never evict unacknowledged route entries.
     auto reply = _redis.command({"EVAL", R"lua(
-if redis.call('XLEN', KEYS[1]) >= tonumber(ARGV[1]) then return false end
-return redis.call('XADD', KEYS[1], '*', 'body', ARGV[2])
-)lua", "1", key, std::to_string(maxEntries), encoded});
-    if (!isString(reply.get())) {
+if redis.call('XLEN', KEYS[1]) >= tonumber(ARGV[1]) then return -1 end
+local id = redis.call('XADD', KEYS[1], '*', 'body', ARGV[2])
+return {id, redis.call('XLEN', KEYS[1])}
+)lua", "1", key, std::to_string(std::min(maxEntries,
+    Config::instance().getStreamSoftLimit())), encoded});
+    if (reply && reply->type == REDIS_REPLY_INTEGER && reply->integer == -1) {
+        const auto count = ++_overloadRejected;
+        if (count == 1 || count % 100 == 0)
+            LOG_WARN << "ROUTE_STREAM_OVERLOADED target=" << message.targetNode
+                     << " count=" << count;
+        return false;
+    }
+    if (!reply || reply->type != REDIS_REPLY_ARRAY || reply->elements != 2 ||
+        !isString(reply->element[0]) || reply->element[1]->type != REDIS_REPLY_INTEGER) {
         ++_failed;
         LOG_ERROR << "ROUTE_STREAM_FAILED node=" << message.targetNode;
         return false;
     }
+    const auto length = static_cast<std::uint64_t>(reply->element[1]->integer);
+    auto peak = _targetStreamPeak.load();
+    while (peak < length && !_targetStreamPeak.compare_exchange_weak(peak, length)) {}
     ++_produced;
     return true;
 }
@@ -179,6 +194,12 @@ bool RouteTransport::ack(const std::string& entryId) {
 }
 bool RouteTransport::handleEntry(const std::string& entryId,
                                  const std::string& payload, int attempts) {
+    if (const char* delay = std::getenv("CHAT_PHASE8_TEST_ROUTE_CONSUMER_DELAY_MS")) {
+        try {
+            const auto ms = std::stoul(delay);
+            if (ms <= 1000) std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+        } catch (...) { /* invalid test hook is ignored */ }
+    }
     ++_consumed;
     auto message = RoutedMessage::decode(payload);
     if (!message) {
@@ -224,7 +245,51 @@ void RouteTransport::consume() {
             continue;
         }
         std::string claimCursor = "0-0";
+        auto nextSample = std::chrono::steady_clock::now();
         while (!_stopping && !context->err) {
+            if (std::chrono::steady_clock::now() >= nextSample) {
+                nextSample = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+                auto length = direct(context.get(), {"XLEN", key});
+                if (length && length->type == REDIS_REPLY_INTEGER) {
+                    const auto value = static_cast<std::uint64_t>(length->integer);
+                    _streamLength = value;
+                    auto peak = _streamPeak.load();
+                    while (peak < value && !_streamPeak.compare_exchange_weak(peak, value)) {}
+                }
+                auto pending = direct(context.get(), {"XPENDING", key, _group});
+                if (pending && pending->type == REDIS_REPLY_ARRAY &&
+                    pending->elements >= 2 && pending->element[0]->type == REDIS_REPLY_INTEGER) {
+                    _pending = static_cast<std::uint64_t>(pending->element[0]->integer);
+                    std::uint64_t oldest = 0;
+                    if (_pending && isString(pending->element[1])) {
+                        try {
+                            const auto id = asString(pending->element[1]);
+                            const auto created = std::stoull(id.substr(0, id.find('-')));
+                            const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                std::chrono::system_clock::now().time_since_epoch()).count();
+                            if (created < static_cast<std::uint64_t>(now))
+                                oldest = static_cast<std::uint64_t>(now) - created;
+                        } catch (...) { /* metric remains zero */ }
+                    }
+                    _oldestPendingMs = oldest;
+                }
+                auto groups = direct(context.get(), {"XINFO", "GROUPS", key});
+                if (groups && groups->type == REDIS_REPLY_ARRAY) {
+                    for (std::size_t g = 0; g < groups->elements; ++g) {
+                        const auto* fields = groups->element[g];
+                        if (!fields || fields->type != REDIS_REPLY_ARRAY) continue;
+                        bool selected = false;
+                        std::uint64_t lag = 0;
+                        for (std::size_t i = 0; i + 1 < fields->elements; i += 2) {
+                            const auto name = asString(fields->element[i]);
+                            if (name == "name") selected = asString(fields->element[i + 1]) == _group;
+                            if (name == "lag" && fields->element[i + 1]->type == REDIS_REPLY_INTEGER)
+                                lag = static_cast<std::uint64_t>(fields->element[i + 1]->integer);
+                        }
+                        if (selected) { _lag = lag; break; }
+                    }
+                }
+            }
             auto claimed = _redis.command({"XAUTOCLAIM", key, _group, _consumer,
                                            "2000", claimCursor, "COUNT", "8"});
             if (claimed && claimed->type == REDIS_REPLY_ARRAY && claimed->elements >= 2) {
@@ -256,7 +321,7 @@ void RouteTransport::consume() {
         if (!_stopping) std::this_thread::sleep_for(std::chrono::seconds(1));
     }
 }
-RouteMetrics RouteTransport::metrics() const {
+RouteMetrics RouteTransport::metrics(bool fresh) const {
     RouteMetrics result;
     result.produced = _produced;
     result.consumed = _consumed;
@@ -265,10 +330,19 @@ RouteMetrics RouteTransport::metrics() const {
     result.claimed = _claimed;
     result.duplicate = _duplicate;
     result.failed = _failed;
-    auto pending = _redis.command({"XPENDING", streamFor(_nodeId), _group});
-    if (pending && pending->type == REDIS_REPLY_ARRAY && pending->elements &&
-        pending->element[0]->type == REDIS_REPLY_INTEGER)
-        result.pending = pending->element[0]->integer;
+    result.pending = _pending;
+    result.streamLength = _streamLength;
+    result.streamPeak = _streamPeak;
+    result.oldestPendingMs = _oldestPendingMs;
+    result.lag = _lag;
+    result.overloadRejected = _overloadRejected;
+    result.targetStreamPeak = _targetStreamPeak;
+    if (fresh) {
+        auto pending = _redis.command({"XPENDING", streamFor(_nodeId), _group});
+        if (pending && pending->type == REDIS_REPLY_ARRAY && pending->elements &&
+            pending->element[0]->type == REDIS_REPLY_INTEGER)
+            result.pending = static_cast<std::uint64_t>(pending->element[0]->integer);
+    }
     return result;
 }
 std::string RouteTransport::nextRouteId() {

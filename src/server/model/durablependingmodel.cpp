@@ -262,9 +262,14 @@ DurableAckStatus DurablePendingModel::markAcked(
     auto rows = queryRows(conn, "SELECT " + std::string(columns) +
         " FROM pending_delivery WHERE delivery_id=" + std::to_string(id) +
         " AND receiver_user_id=" + std::to_string(user) + " LIMIT 1");
-    if (rows && rows->size() == 1 &&
-        rows->front().state == DurableState::Acked)
-        return DurableAckStatus::AlreadyCompleted;
+    if (!rows) return DurableAckStatus::Error;
+    if (rows->size() == 1) {
+        if (rows->front().state == DurableState::Acked)
+            return DurableAckStatus::AlreadyCompleted;
+        if (rows->front().state == DurableState::Expired)
+            return DurableAckStatus::Terminal;
+    }
+    if (rows->empty()) return DurableAckStatus::Terminal;
     return DurableAckStatus::Error;
 }
 std::optional<bool> DurablePendingModel::markWaiting(
@@ -340,7 +345,7 @@ std::optional<std::vector<DurablePendingRecord>> DurablePendingModel::claimForUs
         " FROM pending_delivery WHERE receiver_user_id=" + std::to_string(user) +
         " AND state IN(0,1) AND expire_at_ms>" + std::to_string(nowMs) +
         " AND (state=1 OR (state=0 AND owner_node<>" + quoted(conn, node) + "))" +
-        " ORDER BY delivery_id LIMIT " + std::to_string(std::min(limit, size_t{32})));
+        " ORDER BY delivery_id LIMIT " + std::to_string(std::min(limit, size_t{128})));
     if (!rows) return std::nullopt;
     std::vector<DurablePendingRecord> claimed;
     std::size_t claimedBytes = 0;

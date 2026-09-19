@@ -18,6 +18,7 @@ except ImportError:
     chat_pb2 = None
 
 HOST, PORT = "127.0.0.1", 6000
+ONE_CHAT_MSG_ACK = 18  # include/public.hpp; error/overload response
 
 
 class Wire:
@@ -113,6 +114,8 @@ def run(args):
     duplicate_count = [0] * args.senders
     ack_count = [0] * args.senders
     drop_count = [0] * args.senders
+    rejected_count = [0] * args.senders
+    rejection_codes = {}
     errors = []
     lock = threading.Lock()
     stop = threading.Event()
@@ -173,24 +176,53 @@ def run(args):
         except Exception as error:
             errors.append(f"sender {index}: {error}")
 
+    def sender_response_task(index):
+        _, wire = sender_connections[index]
+        while not stop.is_set():
+            try:
+                response = wire.recv(0.25)
+                if response and response.get("msgid") == ONE_CHAT_MSG_ACK and response.get("errno", 0):
+                    with lock:
+                        rejected_count[index] += 1
+                        code = str(response["errno"])
+                        rejection_codes[code] = rejection_codes.get(code, 0) + 1
+            except Exception as error:
+                errors.append(f"sender response {index}: {error}")
+                return
+
     receivers = [threading.Thread(target=receiver_task, args=(i,), daemon=True)
                  for i in range(args.senders)]
+    sender_readers = [threading.Thread(target=sender_response_task, args=(i,), daemon=True)
+                      for i in range(args.senders)]
     senders = [threading.Thread(target=sender_task, args=(i,))
                for i in range(args.senders)]
     start = time.perf_counter()
-    for thread in receivers + senders:
+    for thread in receivers + sender_readers + senders:
         thread.start()
     for thread in senders:
         thread.join(timeout=15)
     if any(thread.is_alive() for thread in senders):
         errors.append("sender thread did not finish")
 
-    deadline = time.monotonic() + (8.0 if args.drop_ack == "all" else
-                                   3.5 if args.drop_ack == "first10" else 0.7)
+    default_wait = (8.0 if args.drop_ack == "all" else
+                    3.5 if args.drop_ack == "first10" else 0.7)
+    deadline = time.monotonic() + (args.receive_timeout if args.receive_timeout is not None
+                                   else default_wait)
+    completed_at = None
     while time.monotonic() < deadline:
+        with lock:
+            completed = sum(unique_count)
+            if args.allow_rejection:
+                completed += sum(rejected_count)
+            complete = completed >= len(sent_stamps)
+        if complete and args.drop_ack == "none":
+            if completed_at is None:
+                completed_at = time.monotonic()
+            if time.monotonic() - completed_at >= 0.5:
+                break
         time.sleep(0.1)
     stop.set()
-    for thread in receivers:
+    for thread in receivers + sender_readers:
         thread.join(timeout=1)
     elapsed = time.perf_counter() - start
 
@@ -215,6 +247,9 @@ def run(args):
         "duplicate_suppressed": sum(duplicate_count),
         "ack_dropped": sum(drop_count),
         "failed_client_side": len(sent_stamps) - sum(unique_count),
+        "rejected_server_observed": sum(rejected_count),
+        "accepted_estimate": len(sent_stamps) - sum(rejected_count),
+        "rejection_codes": rejection_codes,
         "elapsed_seconds": round(elapsed, 3),
         "qps_unique": round(sum(unique_count) / elapsed, 1),
         "latency": compute_stats(latencies),
@@ -222,7 +257,9 @@ def run(args):
     }
     print(json.dumps(result, indent=2), flush=True)
     expected = args.senders * args.messages
-    if errors or result["sent"] != expected or result["delivered_unique"] != expected:
+    if errors or result["sent"] != expected or (
+        result["delivered_unique"] + (result["rejected_server_observed"]
+                                        if args.allow_rejection else 0) != expected):
         raise RuntimeError("reliable delivery integration failed")
     if args.drop_ack == "all" and result["acked_wire_frames"] != 0:
         raise RuntimeError("100% ACK loss scenario sent ACK")
@@ -239,4 +276,6 @@ if __name__ == "__main__":
     parser.add_argument("--drop-ack", choices=("none", "first10", "all"), default="none")
     parser.add_argument("--typed-ack", action="store_true")
     parser.add_argument("--linger", type=float, default=2.5)
+    parser.add_argument("--receive-timeout", type=float)
+    parser.add_argument("--allow-rejection", action="store_true")
     run(parser.parse_args())

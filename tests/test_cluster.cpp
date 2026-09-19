@@ -110,6 +110,7 @@ TEST_F(ClusterTest, RouteIsStoredWithoutOnlineConsumer)
     ASSERT_TRUE(reply);
     ASSERT_EQ(reply->type, REDIS_REPLY_INTEGER);
     EXPECT_EQ(reply->integer, 1);
+    EXPECT_EQ(transport.metrics().targetStreamPeak, 1u);
     redis.command({"DEL", stream});
 }
 
@@ -130,7 +131,7 @@ TEST_F(ClusterTest, ConsumerAcknowledgesOnlyAcceptedRoute)
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     EXPECT_GE(calls.load(), 2);
     EXPECT_EQ(target.metrics().acked, 1);
-    EXPECT_EQ(target.metrics().pending, 0);
+    EXPECT_EQ(target.metrics(true).pending, 0);
     target.stop();
     redis.command({"DEL", cluster::RouteTransport::streamFor(nodeB),
                    "chat:route:dedup:" + nodeB});
@@ -166,7 +167,7 @@ TEST_F(ClusterTest, UnackedPendingIsClaimedAfterConsumerRestart)
     ASSERT_TRUE(source.send(route));
     for (int i = 0; i < 30 && firstCalls == 0; ++i)
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    EXPECT_EQ(first.metrics().pending, 1);
+    EXPECT_EQ(first.metrics(true).pending, 1);
     first.stop();
     cluster::RouteTransport replacement(redis, nodeB, "replacement");
     std::atomic<int> recovered{0};
@@ -179,7 +180,7 @@ TEST_F(ClusterTest, UnackedPendingIsClaimedAfterConsumerRestart)
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     EXPECT_EQ(recovered.load(), 1);
     EXPECT_EQ(replacement.metrics().claimed, 1);
-    EXPECT_EQ(replacement.metrics().pending, 0);
+    EXPECT_EQ(replacement.metrics(true).pending, 0);
     replacement.stop();
     redis.command({"DEL", stream});
 }
@@ -203,7 +204,7 @@ TEST_F(ClusterTest, InfrastructureFailureNeverAcknowledgesOrDeadLetters)
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     EXPECT_GE(calls.load(), 6); // Exceeds the normal Phase 5 retry bound.
     EXPECT_EQ(target.metrics().acked, 0u);
-    EXPECT_EQ(target.metrics().pending, 1u);
+    EXPECT_EQ(target.metrics(true).pending, 1u);
     recovered = true;
     for (int i = 0; i < 50 && target.metrics().acked == 0; ++i)
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -231,7 +232,7 @@ TEST_F(ClusterTest, TrimmingPreservesOlderUnackedPayload)
     ASSERT_TRUE(source.send(accepted));
     for (int i = 0; i < 30 && target.metrics().acked == 0; ++i)
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    EXPECT_EQ(target.metrics().pending, 1);
+    EXPECT_EQ(target.metrics(true).pending, 1);
     auto entries = redis.command({"XRANGE", stream, "-", "+"});
     ASSERT_TRUE(entries);
     ASSERT_EQ(entries->type, REDIS_REPLY_ARRAY);

@@ -1,48 +1,44 @@
 #ifndef DB_THREAD_POOL_HPP
 #define DB_THREAD_POOL_HPP
 
-#include <queue>
+#include <deque>
 #include <mutex>
 #include <condition_variable>
 #include <functional>
-#include <future>
 #include <thread>
 #include <vector>
-
-using namespace std;
+#include <array>
+#include <atomic>
+#include <cstdint>
 
 // 数据库专用线程池
-// Muduo IO 线程将 DB 写操作提交到池中立即返回，不阻塞事件循环。
-// 读操作如需返回值，通过 future.get() 同步等待。
+// Muduo I/O 线程只做非阻塞提交；队列按优先级和总量硬限制。
 class DBThreadPool
 {
 public:
+    enum class Priority { High = 0, Normal = 1, Low = 2 };
+    enum class SubmitResult { Accepted, QueueFull, Stopped };
+    struct Metrics {
+        std::size_t depth = 0, capacity = 0, peak = 0;
+        std::size_t activeWorkers = 0;
+        std::uint64_t rejected = 0;
+    };
     static DBThreadPool* instance();
 
     // 初始化：启动 threadCount 个后台线程
-    void init(int threadCount);
+    void init(int threadCount, std::size_t maxQueued = 1024,
+              std::size_t reservedHigh = 256);
 
-    // 提交一个任务，返回 future 用于获取结果（或 fire-and-forget）
-    template<typename F>
-    auto submit(F&& f) -> future<decltype(f())>
-    {
-        using Ret = decltype(f());
-        auto task = make_shared<packaged_task<Ret()>>(forward<F>(f));
-        future<Ret> fut = task->get_future();
-
-        {
-            lock_guard<mutex> lg(_mutex);
-            _tasks.emplace([task]() { (*task)(); });
-        }
-        _cv.notify_one();
-
-        return fut;
-    }
-
-    // 提交一个无返回值的任务（fire-and-forget）
-    void submitVoid(function<void()> task);
-    // Durable delivery work must fail closed rather than grow an unbounded queue.
-    bool trySubmitDurable(function<void()> task, size_t maxQueued = 1024);
+    // I/O loop 只能走非阻塞提交；高优先级保留容量供 ACK/新投递。
+    SubmitResult trySubmit(std::function<void()> task,
+                           Priority priority = Priority::Normal);
+    SubmitResult submitVoid(std::function<void()> task,
+                            Priority priority = Priority::Low)
+    { return trySubmit(std::move(task), priority); }
+    bool trySubmitDurable(std::function<void()> task,
+                          Priority priority = Priority::Normal)
+    { return trySubmit(std::move(task), priority) == SubmitResult::Accepted; }
+    Metrics metrics() const;
 
     void shutdown();
 
@@ -51,10 +47,14 @@ private:
 
     void workerLoop();
 
-    vector<thread> _workers;
-    queue<function<void()>> _tasks;
-    mutex _mutex;
-    condition_variable _cv;
+    std::vector<std::thread> _workers;
+    std::array<std::deque<std::function<void()>>, 3> _tasks;
+    mutable std::mutex _mutex;
+    std::condition_variable _cv;
+    std::size_t _capacity = 1024, _reservedHigh = 256, _peak = 0;
+    std::size_t _active = 0;
+    std::uint64_t _rejected = 0;
+    unsigned _highBurst = 0, _normalBurst = 0;
     bool _running = false;
 };
 

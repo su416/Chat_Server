@@ -7,6 +7,8 @@
 #include <condition_variable>
 #include <queue>
 #include <string>
+#include <atomic>
+#include <cstdint>
 using namespace std;
 
 // 数据库连接池（单例）
@@ -34,6 +36,8 @@ public:
 
     // 当前空闲连接数
     int idleCount();
+    std::uint64_t totalWaitMs() const { return _totalWaitMs.load(); }
+    std::uint64_t waitCount() const { return _waitCount.load(); }
 
     // 销毁池中所有连接，进程退出前调用
     void shutdown();
@@ -52,6 +56,7 @@ private:
     condition_variable _cv;
     int _poolSize = 0;
     bool _initialized = false;
+    std::atomic<std::uint64_t> _totalWaitMs{0}, _waitCount{0};
 
     // 保存连接参数，用于归还时发现连接断开后重建
     string _host;

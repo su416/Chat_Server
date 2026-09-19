@@ -31,5 +31,14 @@
     "enabled": false,
     "capacity": 1000,
     "rate_per_sec": 10000.0
+  },
+  "flow": {
+    "db_worker_threads": 4,
+    "db_max_queue_size": 2048,
+    "offline_claim_batch": 32,
+    "offline_users_per_round": 4,
+    "output_high_watermark_bytes": 4194304,
+    "output_hard_limit_bytes": 8388608,
+    "stream_soft_limit": 8000
   }
 }

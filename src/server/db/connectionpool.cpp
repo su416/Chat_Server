@@ -80,9 +80,13 @@ shared_ptr<MySQL> ConnectionPool::wrapConnection(MySQL* conn)
 shared_ptr<MySQL> ConnectionPool::getConnection()
 {
     unique_lock<mutex> lock(_mutex);
+    const auto begin = chrono::steady_clock::now();
+    if (_pool.empty()) ++_waitCount;
 
     // 池空则阻塞，等待其他线程归还连接
     _cv.wait(lock, [this] { return !_pool.empty(); });
+    _totalWaitMs += chrono::duration_cast<chrono::milliseconds>(
+        chrono::steady_clock::now() - begin).count();
 
     MySQL* conn = _pool.front();
     _pool.pop();
@@ -93,14 +97,20 @@ shared_ptr<MySQL> ConnectionPool::getConnection()
 shared_ptr<MySQL> ConnectionPool::getConnection(int timeoutMs)
 {
     unique_lock<mutex> lock(_mutex);
+    const auto begin = chrono::steady_clock::now();
+    if (_pool.empty()) ++_waitCount;
 
     if (!_cv.wait_for(lock, chrono::milliseconds(timeoutMs),
                       [this] { return !_pool.empty(); }))
     {
+        _totalWaitMs += chrono::duration_cast<chrono::milliseconds>(
+            chrono::steady_clock::now() - begin).count();
         LOG_ERROR << "ConnectionPool: getConnection timeout after "
                   << timeoutMs << "ms";
         return nullptr;
     }
+    _totalWaitMs += chrono::duration_cast<chrono::milliseconds>(
+        chrono::steady_clock::now() - begin).count();
 
     MySQL* conn = _pool.front();
     _pool.pop();

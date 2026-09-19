@@ -44,6 +44,13 @@ public:
     bool isRateLimitEnabled() const;
     int getRateLimitCapacity() const;
     double getRateLimitPerSec() const;
+    int getDbWorkerThreads() const;
+    int getDbMaxQueueSize() const;
+    int getOfflineClaimBatch() const;
+    int getOfflineUsersPerRound() const;
+    int getOutputHighWatermarkBytes() const;
+    int getOutputHardLimitBytes() const;
+    int getStreamSoftLimit() const;
 
 private:
     Config() = default;

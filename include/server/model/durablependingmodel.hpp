@@ -25,7 +25,7 @@ struct DurablePendingRecord {
 };
 
 enum class PersistStatus { Inserted, Existing, Error };
-enum class DurableAckStatus { Completed, AlreadyCompleted, Error };
+enum class DurableAckStatus { Completed, AlreadyCompleted, Terminal, Error };
 struct PersistResult {
     PersistStatus status = PersistStatus::Error;
     DurablePendingRecord record;
