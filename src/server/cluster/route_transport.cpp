@@ -147,35 +147,44 @@ void RouteTransport::stop() {
     if (_worker.joinable()) _worker.join();
 }
 bool RouteTransport::send(const RoutedMessage& message) {
-    if (message.targetNode.empty() || message.hops > 1) return false;
+    return sendDetailed(message) == SendResult::Sent;
+}
+RouteTransport::SendResult RouteTransport::sendDetailed(const RoutedMessage& message) {
+    if (message.targetNode.empty() || message.hops > 1) return SendResult::Error;
     const auto encoded = message.encode();
-    if (encoded.size() > maxPayloadBytes) { ++_failed; return false; }
+    if (encoded.size() > maxPayloadBytes) { ++_failed; return SendResult::Error; }
     const auto key = streamFor(message.targetNode);
     // Fail closed at capacity: never evict unacknowledged route entries.
     auto reply = _redis.command({"EVAL", R"lua(
-if redis.call('XLEN', KEYS[1]) >= tonumber(ARGV[1]) then return -1 end
+local length = redis.call('XLEN', KEYS[1])
+if length >= tonumber(ARGV[3]) then return -2 end
+if length >= tonumber(ARGV[1]) then return -1 end
 local id = redis.call('XADD', KEYS[1], '*', 'body', ARGV[2])
 return {id, redis.call('XLEN', KEYS[1])}
 )lua", "1", key, std::to_string(std::min(maxEntries,
-    Config::instance().getStreamSoftLimit())), encoded});
-    if (reply && reply->type == REDIS_REPLY_INTEGER && reply->integer == -1) {
+    Config::instance().getStreamSoftLimit())), encoded, std::to_string(maxEntries)});
+    if (reply && reply->type == REDIS_REPLY_INTEGER &&
+        (reply->integer == -1 || reply->integer == -2)) {
+        const bool hard = reply->integer == -2;
+        if (hard) ++_hardRejected;
         const auto count = ++_overloadRejected;
         if (count == 1 || count % 100 == 0)
             LOG_WARN << "ROUTE_STREAM_OVERLOADED target=" << message.targetNode
+                     << " reason=" << (hard ? "HARD_LIMIT" : "HIGH_WATERMARK")
                      << " count=" << count;
-        return false;
+        return hard ? SendResult::HardLimit : SendResult::HighWatermark;
     }
     if (!reply || reply->type != REDIS_REPLY_ARRAY || reply->elements != 2 ||
         !isString(reply->element[0]) || reply->element[1]->type != REDIS_REPLY_INTEGER) {
         ++_failed;
         LOG_ERROR << "ROUTE_STREAM_FAILED node=" << message.targetNode;
-        return false;
+        return SendResult::Error;
     }
     const auto length = static_cast<std::uint64_t>(reply->element[1]->integer);
     auto peak = _targetStreamPeak.load();
     while (peak < length && !_targetStreamPeak.compare_exchange_weak(peak, length)) {}
     ++_produced;
-    return true;
+    return SendResult::Sent;
 }
 RouteTransport::DedupResult RouteTransport::markAccepted(const std::string& routeId) {
     auto reply = _redis.command({"EVAL", dedupScript, "1",
@@ -337,6 +346,7 @@ RouteMetrics RouteTransport::metrics(bool fresh) const {
     result.lag = _lag;
     result.overloadRejected = _overloadRejected;
     result.targetStreamPeak = _targetStreamPeak;
+    result.hardRejected = _hardRejected;
     if (fresh) {
         auto pending = _redis.command({"XPENDING", streamFor(_nodeId), _group});
         if (pending && pending->type == REDIS_REPLY_ARRAY && pending->elements &&

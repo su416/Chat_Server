@@ -3,6 +3,7 @@
 #include <fstream>
 #include <iostream>
 #include <cstdlib>
+#include <cmath>
 
 using json = nlohmann::json;
 
@@ -55,13 +56,16 @@ bool Config::load(const string& filename)
         _configMap["business.max_history_count"] = to_string(js["business"]["max_history_count"].get<int>());
 
         // rate_limit（可选，不存在时使用默认值）
-        if (js.contains("rate_limit"))
-        {
-            auto& rl = js["rate_limit"];
-            _configMap["rate_limit.enabled"] = rl.value("enabled", true) ? "true" : "false";
-            _configMap["rate_limit.capacity"] = to_string(rl.value("capacity", 1000));
-            _configMap["rate_limit.rate_per_sec"] = to_string(rl.value("rate_per_sec", 10000.0));
-        }
+        const auto rl = js.value("rate_limit", json::object());
+        _configMap["rate_limit.enabled"] = rl.value("enabled", false) ? "true" : "false";
+        _configMap["rate_limit.capacity"] = to_string(rl.value("user_capacity", rl.value("capacity", 1000)));
+        _configMap["rate_limit.rate_per_sec"] = to_string(rl.value("user_rate_per_sec", rl.value("rate_per_sec", 10000.0)));
+        _configMap["rate_limit.global_capacity"] = to_string(rl.value("global_capacity", 5000));
+        _configMap["rate_limit.global_rate_per_sec"] = to_string(rl.value("global_rate_per_sec", 3000.0));
+        if (getRateLimitCapacity() <= 0 || getGlobalRateLimitCapacity() <= 0 ||
+            !std::isfinite(getRateLimitPerSec()) || getRateLimitPerSec() <= 0 ||
+            !std::isfinite(getGlobalRateLimitPerSec()) || getGlobalRateLimitPerSec() <= 0)
+            throw std::invalid_argument("invalid rate_limit configuration");
         const auto flow = js.value("flow", json::object());
         _configMap["flow.db_worker_threads"] = to_string(flow.value("db_worker_threads", js["server"]["thread_num"].get<int>()));
         _configMap["flow.db_max_queue_size"] = to_string(flow.value("db_max_queue_size", 2048));
@@ -227,6 +231,8 @@ int Config::getOfflineUsersPerRound() const { return stoi(_configMap.at("flow.of
 int Config::getOutputHighWatermarkBytes() const { return stoi(_configMap.at("flow.output_high_watermark_bytes")); }
 int Config::getOutputHardLimitBytes() const { return stoi(_configMap.at("flow.output_hard_limit_bytes")); }
 int Config::getStreamSoftLimit() const { return stoi(_configMap.at("flow.stream_soft_limit")); }
+int Config::getGlobalRateLimitCapacity() const { return stoi(_configMap.at("rate_limit.global_capacity")); }
+double Config::getGlobalRateLimitPerSec() const { return stod(_configMap.at("rate_limit.global_rate_per_sec")); }
 int Config::getAckTimeoutMs() const { return stoi(_configMap.at("flow.ack_timeout_ms")); }
 int Config::getMaxRetries() const { return stoi(_configMap.at("flow.max_retries")); }
 int Config::getPendingMaxEntries() const { return stoi(_configMap.at("flow.pending_max_entries")); }

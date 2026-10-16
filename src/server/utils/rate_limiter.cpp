@@ -1,5 +1,8 @@
 #include "rate_limiter.hpp"
 #include <chrono>
+#include <algorithm>
+#include <cmath>
+#include <stdexcept>
 
 RateLimiter* RateLimiter::instance()
 {
@@ -7,49 +10,67 @@ RateLimiter* RateLimiter::instance()
     return &limiter;
 }
 
-void RateLimiter::init(int capacity, double rate)
+void RateLimiter::init(int capacity, double rate, int globalCapacity, double globalRate)
 {
+    lock_guard<mutex> lg(_mutex);
     if (_initialized) return;
+    if (capacity <= 0 || !std::isfinite(rate) || rate <= 0 ||
+        globalCapacity < 0 || !std::isfinite(globalRate) || globalRate < 0 ||
+        ((globalCapacity == 0) != (globalRate == 0)))
+        throw std::invalid_argument("invalid token bucket configuration");
 
     _capacity = capacity;
     _ratePerMs = rate / 1000.0;      // 转成每毫秒速率
+    _globalCapacity = globalCapacity;
+    _globalRatePerMs = globalRate / 1000.0;
     _initialized = true;
 }
 
 bool RateLimiter::allow(int userId)
 {
-    // 未初始化 = 禁用，零开销跳过
-    if (!_initialized)
-        return true;
+    return check(userId) == Decision::Allowed;
+}
 
-    auto now = chrono::duration_cast<chrono::milliseconds>(
-        chrono::steady_clock::now().time_since_epoch()).count();
-
+RateLimiter::Decision RateLimiter::check(int userId, Clock::time_point timestamp)
+{
+    const auto now = chrono::duration_cast<chrono::milliseconds>(
+        timestamp.time_since_epoch()).count();
     lock_guard<mutex> lg(_mutex);
+    if (!_initialized) return Decision::Allowed;
 
-    auto it = _buckets.find(userId);
-    if (it == _buckets.end())
-    {
-        // 新用户：初始满令牌，消耗 1
-        _buckets[userId] = { static_cast<double>(_capacity - 1), now };
-        return true;
+    auto refill = [now](Bucket& bucket, int capacity, double rate) {
+        if (now > bucket.lastRefill) {
+            bucket.tokens = std::min(static_cast<double>(capacity),
+                bucket.tokens + static_cast<double>(now - bucket.lastRefill) * rate);
+            bucket.lastRefill = now;
+        }
+    };
+    auto& user = _buckets.try_emplace(userId,
+        Bucket{static_cast<double>(_capacity), now}).first->second;
+    refill(user, _capacity, _ratePerMs);
+    if (user.tokens < 1.0) {
+        ++_metrics.userRejected;
+        return Decision::UserLimited;
     }
+    if (_globalCapacity > 0) {
+        if (!_globalBucket)
+            _globalBucket = Bucket{static_cast<double>(_globalCapacity), now};
+        refill(*_globalBucket, _globalCapacity, _globalRatePerMs);
+        if (_globalBucket->tokens < 1.0) {
+            ++_metrics.globalRejected;
+            return Decision::GlobalLimited;
+        }
+        _globalBucket->tokens -= 1.0;
+    }
+    // Atomic admission: a global rejection does not consume user tokens.
+    user.tokens -= 1.0;
+    return Decision::Allowed;
+}
 
-    Bucket& b = it->second;
-
-    // 按时间差补充令牌
-    double elapsed = static_cast<double>(now - b.lastRefill);
-    b.tokens += elapsed * _ratePerMs;
-    if (b.tokens > _capacity)
-        b.tokens = _capacity;
-    b.lastRefill = now;
-
-    // 令牌不足，拒绝
-    if (b.tokens < 1.0)
-        return false;
-
-    b.tokens -= 1.0;
-    return true;
+RateLimiter::Metrics RateLimiter::metrics()
+{
+    lock_guard<mutex> lg(_mutex);
+    return _metrics;
 }
 
 void RateLimiter::cleanup(int idleSeconds)
@@ -74,5 +95,7 @@ void RateLimiter::reset()
 {
     lock_guard<mutex> lg(_mutex);
     _buckets.clear();
+    _globalBucket.reset();
+    _metrics = {};
     _initialized = false;
 }

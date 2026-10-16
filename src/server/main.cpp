@@ -50,7 +50,9 @@ int main(int argc, char **argv)
         {
             RateLimiter::instance()->init(
                 cfg.getRateLimitCapacity(),
-                cfg.getRateLimitPerSec()
+                cfg.getRateLimitPerSec(),
+                cfg.getGlobalRateLimitCapacity(),
+                cfg.getGlobalRateLimitPerSec()
             );
         }
     }

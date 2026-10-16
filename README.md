@@ -101,6 +101,8 @@ cp conf/chatserver.example.json conf/chatserver.local.json
 
 关键项包括监听地址、`node_id`、MySQL/Redis、DB queue、Pending 上限、ACK timeout/retry、offline claim、Stream soft limit 和 socket output watermarks。容器可使用 `CHAT_SERVER_*`、`CHAT_NODE_ID`、`CHAT_MYSQL_*`、`CHAT_REDIS_*` 覆盖连接参数，密码无需写入镜像。
 
+普通单聊/群聊可启用 per-user + Gateway global Token Bucket，控制消息绕过聊天配额；目标 Stream 到达高水位时明确返回 `TARGET_OVERLOADED`。配置兼容、错误语义和验证方法见 [流量治理](docs/rate_limiting.md)。
+
 提交到仓库的 `chat_password`、`root_password` 只是本地演示占位值，不能用于真实部署。
 
 ## Database Initialization

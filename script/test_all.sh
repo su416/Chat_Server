@@ -9,6 +9,7 @@ cd "$ROOT"
 ./script/build.sh
 ctest --test-dir build --output-on-failure
 ./script/gen_python_proto.sh
+python3 script/traffic_governance_integration.py
 python3 script/phase6_phase3_regression.py
 python3 script/phase4_two_node_integration.py
 python3 script/phase5_stream_integration.py

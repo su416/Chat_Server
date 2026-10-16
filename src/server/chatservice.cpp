@@ -43,6 +43,21 @@ void sendTcpJson(const TcpConnectionPtr &conn, const json &js)
     ChatServer::sendResponse(conn, js);
 }
 
+bool admitChat(const TcpConnectionPtr& conn, int userId, int responseType)
+{
+    const auto decision = RateLimiter::instance()->check(userId);
+    if (decision == RateLimiter::Decision::Allowed) return true;
+    const bool userLimited = decision == RateLimiter::Decision::UserLimited;
+    const char* reason = userLimited ? "RATE_LIMITED" : "SERVER_OVERLOADED";
+    const auto metrics = RateLimiter::instance()->metrics();
+    const auto count = userLimited ? metrics.userRejected : metrics.globalRejected;
+    if (count == 1 || count % 100 == 0)
+        LOG_WARN << "CHAT_ADMISSION_REJECTED reason=" << reason << " count=" << count;
+    sendTcpJson(conn, json{{"msgid", responseType}, {"errno", userLimited ? 3 : 4},
+                          {"reason", reason}, {"retryable", true}, {"errmsg", reason}});
+    return false;
+}
+
 }
 
 // 获取单例对象的接口函数
@@ -370,15 +385,7 @@ void ChatService::oneChat(const TcpConnectionPtr &conn, json &js, Timestamp time
     }
 
     // 限流检查
-    if (!RateLimiter::instance()->allow(fromid))
-    {
-        json response;
-        response["msgid"] = ONE_CHAT_MSG_ACK;
-        response["errno"] = 3;
-        response["errmsg"] = "rate limit exceeded, slow down";
-        sendTcpJson(conn, response);
-        return;
-    }
+    if (!admitChat(conn, fromid, ONE_CHAT_MSG_ACK)) return;
 
     // 异步落库单聊历史消息（快照发送者昵称到 extra 列，避免历史查询 JOIN）
     string name = js.value("name", "");
@@ -449,6 +456,10 @@ void ChatService::oneChat(const TcpConnectionPtr &conn, json &js, Timestamp time
     if (status == RouteStatus::Offline)
         storeDurableOffline(fromid, toid, js, conn, recordHistory);
     else if (status == RouteStatus::Sent) recordHistory();
+    else if (status == RouteStatus::TargetOverloaded)
+        sendTcpJson(conn, json{{"msgid", ONE_CHAT_MSG_ACK}, {"errno", 4},
+                               {"reason", "TARGET_OVERLOADED"}, {"retryable", true},
+                               {"errmsg", "target Stream capacity unavailable"}});
     else if (status == RouteStatus::Error)
         sendTcpJson(conn, json{{"msgid", ONE_CHAT_MSG_ACK}, {"errno", 6},
                                {"errmsg", "cross-node route unavailable"}});
@@ -646,15 +657,7 @@ void ChatService::groupChat(const TcpConnectionPtr &conn, json &js, Timestamp ti
     }
 
     // 限流检查
-    if (!RateLimiter::instance()->allow(userid))
-    {
-        json response;
-        response["msgid"] = GROUP_CHAT_MSG_ACK;
-        response["errno"] = 3;
-        response["errmsg"] = "rate limit exceeded, slow down";
-        sendTcpJson(conn, response);
-        return;
-    }
+    if (!admitChat(conn, userid, GROUP_CHAT_MSG_ACK)) return;
 
     // 异步落库群聊历史消息（快照发送者昵称）
     {
@@ -671,6 +674,7 @@ void ChatService::groupChat(const TcpConnectionPtr &conn, json &js, Timestamp ti
 
     vector<int> useridVec = _groupModel.queryGroupUsers(userid, groupid);
 
+    bool overloaded = false;
     for (int id : useridVec)
     {
         if (auto session = _sessionManager.sessionForUser(id);
@@ -681,7 +685,13 @@ void ChatService::groupChat(const TcpConnectionPtr &conn, json &js, Timestamp ti
         }
         const auto status = routeToUser(id, userid, GROUP_CHAT_MSG, js);
         if (status == RouteStatus::Offline) storeLegacyGroupOffline(userid, id, js);
+        if (status == RouteStatus::TargetOverloaded) overloaded = true;
     }
+    if (overloaded)
+        sendTcpJson(conn, json{{"msgid", GROUP_CHAT_MSG_ACK}, {"errno", 4},
+                              {"reason", "TARGET_OVERLOADED"}, {"retryable", false},
+                              {"partial", true},
+                              {"errmsg", "some group recipients were not accepted"}});
 }
 
 ChatService::RouteStatus ChatService::routeToUser(
@@ -710,7 +720,11 @@ ChatService::RouteStatus ChatService::routeToUser(
     route.senderUserId = senderId;
     route.receiverUserId = receiverId;
     route.payload = payload;
-    if (!_route.send(route))
+    const auto result = _route.sendDetailed(route);
+    if (result == cluster::RouteTransport::SendResult::HighWatermark ||
+        result == cluster::RouteTransport::SendResult::HardLimit)
+        return RouteStatus::TargetOverloaded;
+    if (result != cluster::RouteTransport::SendResult::Sent)
     {
         ++_routeFailed;
         LOG_ERROR << "ROUTE_FAILED xadd route=" << route.routeId
@@ -1525,6 +1539,7 @@ void ChatService::logClusterMetrics() const
 {
     const auto presence = _presence.metrics();
     const auto route = _route.metrics();
+    const auto admission = RateLimiter::instance()->metrics();
     LOG_INFO << "CLUSTER_METRICS node=" << _presence.nodeId()
              << " presence_bind=" << presence.bind
              << " presence_unbind=" << presence.unbind
@@ -1549,6 +1564,10 @@ void ChatService::logClusterMetrics() const
              << " stream_oldest_pending_ms=" << route.oldestPendingMs
              << " stream_lag=" << route.lag
              << " stream_overload_rejected=" << route.overloadRejected
+             << " route_backpressure_rejected=" << route.overloadRejected
+             << " stream_hard_rejected=" << route.hardRejected
+             << " rate_limit_user_rejected=" << admission.userRejected
+             << " rate_limit_global_rejected=" << admission.globalRejected
              << " target_stream_peak=" << route.targetStreamPeak
              << " node_heartbeat=" << presence.nodeHeartbeat;
 }

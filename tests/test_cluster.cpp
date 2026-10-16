@@ -6,6 +6,8 @@
 
 #include <chrono>
 #include <thread>
+#include <fstream>
+#include <vector>
 #include <unistd.h>
 
 namespace {
@@ -26,6 +28,21 @@ protected:
     Redis redis;
     int userId = 0;
     std::string nodeA, nodeB;
+    void setSoftLimit(int limit) {
+        nlohmann::json config;
+        std::ifstream(CHAT_TEST_CONFIG) >> config;
+        config["flow"]["stream_soft_limit"] = limit;
+        char path[] = "/tmp/chat-stream-config-XXXXXX";
+        const int fd = mkstemp(path);
+        ASSERT_GE(fd, 0);
+        close(fd);
+        { std::ofstream file(path); file << config.dump(); }
+        EXPECT_TRUE(Config::instance().load(path));
+        unlink(path);
+    }
+    void TearDown() override {
+        Config::instance().load(CHAT_TEST_CONFIG);
+    }
 };
 }
 
@@ -112,6 +129,76 @@ TEST_F(ClusterTest, RouteIsStoredWithoutOnlineConsumer)
     EXPECT_EQ(reply->integer, 1);
     EXPECT_EQ(transport.metrics().targetStreamPeak, 1u);
     redis.command({"DEL", stream});
+}
+
+TEST_F(ClusterTest, HighWatermarkRejectsAndRecoversWithoutEvictingPel)
+{
+    setSoftLimit(2);
+    cluster::RouteTransport source(redis, nodeA);
+    const auto key = cluster::RouteTransport::streamFor(nodeB);
+    const auto group = "watermark-test";
+    cluster::RoutedMessage route{"watermark", nodeA, nodeB,
+        6, userId, userId + 1, 0, {{"msgid", 6}, {"msg", "watermark"}}};
+    ASSERT_TRUE(source.send(route));
+    redis.command({"XGROUP", "CREATE", key, group, "0"});
+    redis.command({"XREADGROUP", "GROUP", group, "consumer", "COUNT", "1", "STREAMS", key, ">"});
+    ASSERT_TRUE(source.send(route));
+    EXPECT_EQ(source.sendDetailed(route), cluster::RouteTransport::SendResult::HighWatermark);
+    EXPECT_EQ(redis.command({"XLEN", key})->integer, 2);
+    auto pending = redis.command({"XPENDING", key, group});
+    ASSERT_TRUE(pending && pending->type == REDIS_REPLY_ARRAY);
+    EXPECT_EQ(pending->element[0]->integer, 1);
+    // Complete this test group's messages, then let the production consumer
+    // replay/accept them and apply its existing safe prefix trim.
+    auto first = redis.command({"XPENDING", key, group, "-", "+", "1"});
+    const auto* id = first->element[0]->element[0];
+    redis.command({"XACK", key, group, std::string(id->str, id->len)});
+    redis.command({"XGROUP", "DESTROY", key, group});
+    cluster::RouteTransport target(redis, nodeB);
+    ASSERT_TRUE(target.start([](cluster::RoutedMessage) { return cluster::RouteOutcome::Accepted; }));
+    for (int i = 0; i < 50 && target.metrics().acked < 2; ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    target.stop();
+    ASSERT_EQ(target.metrics().acked, 2u);
+    EXPECT_EQ(source.sendDetailed(route), cluster::RouteTransport::SendResult::Sent);
+    EXPECT_EQ(source.metrics().overloadRejected, 1u);
+    redis.command({"DEL", key});
+}
+
+TEST_F(ClusterTest, HardLimitRemainsDistinctAndDoesNotEvictPayload)
+{
+    setSoftLimit(8);
+    const auto key = cluster::RouteTransport::streamFor(nodeB);
+    ASSERT_TRUE(redis.command({"EVAL",
+        "for i=1,10000 do redis.call('XADD',KEYS[1],'*','body','test') end return redis.call('XLEN',KEYS[1])",
+        "1", key}));
+    cluster::RouteTransport source(redis, nodeA);
+    cluster::RoutedMessage route{"hard", nodeA, nodeB,
+        6, userId, userId + 1, 0, {{"msgid", 6}}};
+    EXPECT_EQ(source.sendDetailed(route), cluster::RouteTransport::SendResult::HardLimit);
+    EXPECT_EQ(redis.command({"XLEN", key})->integer, 10000);
+    EXPECT_EQ(source.metrics().hardRejected, 1u);
+    redis.command({"DEL", key});
+}
+
+TEST_F(ClusterTest, ConcurrentProducersCannotOvershootWatermark)
+{
+    setSoftLimit(8);
+    cluster::RouteTransport source(redis, nodeA);
+    cluster::RoutedMessage route{"concurrent", nodeA, nodeB,
+        6, userId, userId + 1, 0, {{"msgid", 6}}};
+    std::atomic<int> accepted{0};
+    std::vector<std::thread> workers;
+    for (int i = 0; i < 4; ++i)
+        workers.emplace_back([&] {
+            for (int j = 0; j < 8; ++j) if (source.send(route)) ++accepted;
+        });
+    for (auto& thread : workers) thread.join();
+    EXPECT_EQ(accepted.load(), 8);
+    EXPECT_EQ(source.metrics().overloadRejected, 24u);
+    const auto key = cluster::RouteTransport::streamFor(nodeB);
+    EXPECT_EQ(redis.command({"XLEN", key})->integer, 8);
+    redis.command({"DEL", key});
 }
 
 TEST_F(ClusterTest, ConsumerAcknowledgesOnlyAcceptedRoute)

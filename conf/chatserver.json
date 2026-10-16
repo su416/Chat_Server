@@ -1,4 +1,4 @@
-{ 
+{
   "server": {
     "ip": "127.0.0.1",
     "port": 6000,
@@ -18,7 +18,7 @@
     "host": "127.0.0.1",
     "port": 6379
   },
-  "protocol": {            
+  "protocol": {
     "use_protobuf_history": true
   },
   "log": {
@@ -29,8 +29,10 @@
   },
   "rate_limit": {
     "enabled": false,
-    "capacity": 1000,
-    "rate_per_sec": 10000.0
+    "user_capacity": 1000,
+    "user_rate_per_sec": 10000.0,
+    "global_capacity": 5000,
+    "global_rate_per_sec": 3000.0
   },
   "flow": {
     "db_worker_threads": 4,

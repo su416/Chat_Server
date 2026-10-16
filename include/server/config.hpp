@@ -44,6 +44,8 @@ public:
     bool isRateLimitEnabled() const;
     int getRateLimitCapacity() const;
     double getRateLimitPerSec() const;
+    int getGlobalRateLimitCapacity() const;
+    double getGlobalRateLimitPerSec() const;
     int getDbWorkerThreads() const;
     int getDbMaxQueueSize() const;
     int getOfflineClaimBatch() const;

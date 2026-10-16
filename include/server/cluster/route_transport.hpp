@@ -36,6 +36,7 @@ struct RouteMetrics {
     std::uint64_t streamLength = 0, streamPeak = 0;
     std::uint64_t oldestPendingMs = 0, lag = 0, overloadRejected = 0;
     std::uint64_t targetStreamPeak = 0;
+    std::uint64_t hardRejected = 0;
 };
 
 // 每节点一条 Stream + Consumer Group；routeId 与目标节点 deliveryId 不同。
@@ -46,6 +47,8 @@ public:
     bool start(std::function<RouteOutcome(RoutedMessage)> handler);
     void stop();
     bool send(const RoutedMessage& message);
+    enum class SendResult { Sent, HighWatermark, HardLimit, Error };
+    SendResult sendDetailed(const RoutedMessage& message);
     // Accepted / Duplicate / Error. Marker is written only after local Pending accepted.
     enum class DedupResult { New, Duplicate, Error };
     DedupResult markAccepted(const std::string& routeId);
@@ -72,7 +75,7 @@ private:
         _retried{0}, _claimed{0}, _duplicate{0}, _failed{0};
     std::atomic<std::uint64_t> _streamLength{0}, _streamPeak{0},
         _pending{0}, _oldestPendingMs{0}, _lag{0}, _overloadRejected{0},
-        _targetStreamPeak{0};
+        _targetStreamPeak{0}, _hardRejected{0};
 };
 
 } // namespace cluster

@@ -22,8 +22,11 @@ set(COMMON_LIBS GTest::gtest GTest::gtest_main ssl crypto)
 add_executable(test_rate_limiter
     test_rate_limiter.cpp
     ${PROJECT_SOURCE_DIR}/src/server/utils/rate_limiter.cpp
+    ${PROJECT_SOURCE_DIR}/src/server/config.cpp
 )
-target_link_libraries(test_rate_limiter ${COMMON_LIBS})
+target_compile_definitions(test_rate_limiter PRIVATE
+    CHAT_TEST_CONFIG="${PROJECT_SOURCE_DIR}/conf/chatserver.json")
+target_link_libraries(test_rate_limiter ${COMMON_LIBS} pthread)
 
 add_executable(test_jsoncodec
     test_jsoncodec.cpp

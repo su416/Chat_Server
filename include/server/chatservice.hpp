@@ -86,7 +86,7 @@ public:
 
 private:
     ChatService();
-    enum class RouteStatus { Sent, Offline, Error };
+    enum class RouteStatus { Sent, Offline, TargetOverloaded, Error };
     RouteStatus routeToUser(int receiverId, int senderId, int messageType,
                             const json& payload);
     void processRoutedMessage(
