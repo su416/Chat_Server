@@ -386,7 +386,6 @@ void ChatService::oneChat(const TcpConnectionPtr &conn, json &js, Timestamp time
 
     // 限流检查
     if (!admitChat(conn, fromid, ONE_CHAT_MSG_ACK)) return;
-
     // 异步落库单聊历史消息（快照发送者昵称到 extra 列，避免历史查询 JOIN）
     string name = js.value("name", "");
     string extra = name.empty() ? "" : json{{"name", name}}.dump();

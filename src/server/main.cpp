@@ -105,7 +105,6 @@ int main(int argc, char **argv)
     loop.runEvery(0.5, []() {
         ChatService::instance()->scanReliableDeliveries();
     });
-
     loop.loop();  // 阻塞直到 quit() 被调用
 
     ChatService::instance()->reset();

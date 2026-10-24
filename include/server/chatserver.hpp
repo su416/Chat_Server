@@ -28,7 +28,6 @@ public:
         std::uint64_t queuedPeakBytes, outputPeakBytes;
     };
     static OutputMetrics outputMetrics();
-
     // 客户端统一出站边界：业务 JSON 转内部消息后按连接协议编码。
     static void sendResponse(const TcpConnectionPtr& conn,
                              const nlohmann::json& response,
